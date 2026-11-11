@@ -17,6 +17,9 @@ from app.models.conversation import Conversation
 from app.models.conversation_participant import ConversationParticipant
 from app.models.conversation_invitation import ConversationInvitation
 
+from app.models.message import Message
+from app.models.message_user_deletion import MessageUserDeletion
+
 
 __all__ = [
     "User",
@@ -34,4 +37,6 @@ __all__ = [
     "Conversation",
     "ConversationParticipant",
     "ConversationInvitation",
+    "Message",
+    "MessageUserDeletion",
 ]

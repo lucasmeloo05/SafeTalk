@@ -1,6 +1,5 @@
 
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -11,9 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import User
+from app.models import User, UserPrivacySettings
 from app.schemas import TokenResponse, UserCreate, UserLogin, UserResponse
 from app.settings import settings
+
 
 router = APIRouter(prefix="/users", tags=["Usuários"])
 
@@ -31,8 +31,10 @@ def create_user(
 ):
     existing_user = db.scalar(
         select(User).where(
-            (User.username == user_data.username)
-            | (User.email == str(user_data.email))
+            or_(
+                User.username == user_data.username,
+                User.email == str(user_data.email),
+            )
         )
     )
 
@@ -49,11 +51,19 @@ def create_user(
         birth_date=user_data.birth_date,
     )
 
-    db.add(user)
-
     try:
+        db.add(user)
+        db.flush()
+
+        privacy_settings = UserPrivacySettings(
+            user_id=user.id,
+        )
+
+        db.add(privacy_settings)
+
         db.commit()
         db.refresh(user)
+
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -88,6 +98,12 @@ def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Esta conta está desativada.",
+        )
+
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=30)
 
@@ -106,8 +122,9 @@ def login(
         "token_type": "bearer",
     }
 
+
 @router.get("/me", response_model=UserResponse)
 def read_current_user(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: User = Depends(get_current_user),
 ):
     return current_user
