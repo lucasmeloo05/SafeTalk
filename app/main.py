@@ -7,6 +7,9 @@ from app.database import engine
 from app.routers.users import router as users_router
 from app.routers.conversations import router as conversations_router
 from app.routers.messages import router as messages_router
+from app.routers.servers import router as servers_router
+from app.routers.server_members import router as server_members_router
+from app.routers.server_roles import router as server_roles_router
 
 
 app = FastAPI(
@@ -18,6 +21,9 @@ app = FastAPI(
 app.include_router(users_router)
 app.include_router(conversations_router)
 app.include_router(messages_router)
+app.include_router(servers_router)
+app.include_router(server_members_router)
+app.include_router(server_roles_router)
 
 
 @app.get("/")

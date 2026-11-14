@@ -3,6 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -22,6 +23,10 @@ class ServerRole(Base):
     __tablename__ = "server_roles"
 
     __table_args__ = (
+        CheckConstraint(
+            "position >= 1",
+            name="ck_server_roles_position_positive",
+        ),
         UniqueConstraint(
             "server_id",
             "name",
@@ -69,7 +74,6 @@ class ServerRole(Base):
 
     position: Mapped[int] = mapped_column(
         Integer,
-        default=0,
         nullable=False
     )
 
@@ -77,6 +81,13 @@ class ServerRole(Base):
         Boolean,
         default=False,
         nullable=False
+    )
+
+    is_system_role: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(

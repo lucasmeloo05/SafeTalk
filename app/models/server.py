@@ -1,7 +1,18 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -9,6 +20,13 @@ from app.database import Base
 
 class Server(Base):
     __tablename__ = "servers"
+
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(everyone_permissions) = 'object'",
+            name="ck_servers_everyone_permissions_object",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer,
@@ -47,6 +65,13 @@ class Server(Base):
         Boolean,
         default=False,
         nullable=False
+    )
+
+    everyone_permissions: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(

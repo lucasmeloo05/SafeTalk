@@ -1,14 +1,21 @@
 
 import re
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     EmailStr,
     Field,
+    RootModel,
+    StrictBool,
+    StrictInt,
     field_validator,
+    model_validator,
 )
+
+from app.server_permissions import ServerPermissionKey
 
 
 class UserCreate(BaseModel):
@@ -104,3 +111,104 @@ class MessageResponse(BaseModel):
     is_deleted_for_everyone: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ServerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("O nome do servidor não pode estar vazio.")
+        return value
+
+
+class ServerUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("O nome do servidor não pode estar vazio.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_update_fields(self):
+        if not self.model_fields_set:
+            raise ValueError("Informe ao menos um campo para atualização.")
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("O nome do servidor não pode ser nulo.")
+        return self
+
+
+class ServerEveryonePermissionsUpdate(
+    RootModel[dict[ServerPermissionKey, StrictBool]]
+):
+    """Replacement configuration; only documented keys and JSON booleans."""
+
+
+class ServerEveryonePermissionsResponse(BaseModel):
+    server_id: int
+    everyone_permissions: dict[ServerPermissionKey, StrictBool]
+
+
+class ServerResponse(BaseModel):
+    id: int
+    owner_id: int
+    name: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ServerMemberResponse(BaseModel):
+    user_id: int
+    username: str
+    joined_at: datetime
+
+
+class ServerRoleResponse(BaseModel):
+    id: int
+    server_id: int
+    name: str
+    description: str | None
+    permissions: dict[str, Any]
+    position: int
+    is_default: bool
+    is_system_role: bool
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ServerRoleCreate(BaseModel):
+    name: str = Field(max_length=50)
+    description: str | None = Field(default=None, max_length=255)
+    position: StrictInt = Field(ge=1)
+    permissions: dict[ServerPermissionKey, StrictBool] = Field(
+        default_factory=dict
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("O nome do cargo não pode estar vazio.")
+        return value

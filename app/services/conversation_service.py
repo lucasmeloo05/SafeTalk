@@ -98,6 +98,34 @@ def create_or_get_direct_conversation(
     )
 
     if existing_conversation is not None:
+        active_participant = db.scalar(
+            select(ConversationParticipant).where(
+                ConversationParticipant.conversation_id == existing_conversation.id,
+                ConversationParticipant.user_id == current_user.id,
+                ConversationParticipant.status == "ACTIVE",
+            )
+        )
+        if active_participant is not None:
+            return existing_conversation
+
+        left_participant = db.scalar(
+            select(ConversationParticipant)
+            .where(
+                ConversationParticipant.conversation_id == existing_conversation.id,
+                ConversationParticipant.user_id == current_user.id,
+                ConversationParticipant.status == "LEFT",
+            )
+            .order_by(ConversationParticipant.id.desc())
+            .limit(1)
+            .with_for_update()
+        )
+
+        if left_participant is not None:
+            left_participant.status = "ACTIVE"
+            left_participant.left_at = None
+            db.commit()
+            db.refresh(existing_conversation)
+
         return existing_conversation
 
     # Cria a conversa individual.
