@@ -12,6 +12,13 @@ from app.models.server_member_role import ServerMemberRole
 from app.models.server_channel import ServerChannel
 from app.models.server_invite import ServerInvite
 from app.models.server_config_history import ServerConfigHistory
+from app.models.server_ban import ServerBan
+from app.models.server_audit_log import ServerAuditLog
+
+from app.models.moderation_report import ModerationReport
+from app.models.moderation_report_evidence import ModerationReportEvidence
+from app.models.moderation_action import ModerationAction
+from app.models.moderation_analysis_job import ModerationAnalysisJob
 
 from app.models.conversation import Conversation
 from app.models.conversation_participant import ConversationParticipant
@@ -34,6 +41,12 @@ __all__ = [
     "ServerChannel",
     "ServerInvite",
     "ServerConfigHistory",
+    "ServerBan",
+    "ServerAuditLog",
+    "ModerationReport",
+    "ModerationReportEvidence",
+    "ModerationAction",
+    "ModerationAnalysisJob",
     "Conversation",
     "ConversationParticipant",
     "ConversationInvitation",
