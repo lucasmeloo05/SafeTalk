@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
+from app.models.platform_staff import PlatformStaff
 from app.settings import settings
 
 bearer_scheme = HTTPBearer()
@@ -50,3 +51,50 @@ def get_current_user(
         raise credentials_exception
 
     return user
+
+
+def resolve_current_platform_staff(
+    db: Session,
+    current_user: User,
+) -> PlatformStaff:
+    staff = db.get(PlatformStaff, current_user.id)
+    if (
+        staff is None
+        or staff.status != "ACTIVE"
+        or staff.revoked_at is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acesso restrito à equipe oficial da plataforma.",
+        )
+    return staff
+
+
+def get_current_platform_staff(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> PlatformStaff:
+    """Resolve an active official staff member from the authenticated user."""
+    return resolve_current_platform_staff(db, current_user)
+
+
+def require_platform_staff_roles(*allowed_roles: str):
+    """Create a dependency restricted to active staff with the given roles."""
+    valid_roles = {"ADMIN", "MODERATOR"}
+    if any(role not in valid_roles for role in allowed_roles):
+        raise ValueError("Papel oficial de plataforma inválido.")
+
+    def dependency(
+        staff: Annotated[
+            PlatformStaff,
+            Depends(get_current_platform_staff),
+        ],
+    ) -> PlatformStaff:
+        if allowed_roles and staff.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Seu papel não permite esta operação.",
+            )
+        return staff
+
+    return dependency

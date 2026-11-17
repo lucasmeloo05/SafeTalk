@@ -49,6 +49,7 @@ os.environ["POSTGRES_DB"] = test_url.database or "plataforma_tcc_test"
 os.environ["POSTGRES_HOST"] = test_url.host or "127.0.0.1"
 os.environ["POSTGRES_PORT"] = str(test_url.port or 55432)
 os.environ["JWT_SECRET_KEY"] = "pytest-only-secret-never-use-outside-tests"
+os.environ["MODERATION_WORKER_ENABLED"] = "false"
 
 import app.models  # noqa: E402,F401  Ensure every model is registered.
 from app.database import Base, get_db  # noqa: E402
