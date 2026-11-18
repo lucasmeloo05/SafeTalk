@@ -1,4 +1,5 @@
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -49,6 +50,11 @@ def read_messages(
     db: Annotated[Session, Depends(get_db)],
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    latest: bool = Query(default=False),
+    after_created_at: datetime | None = Query(default=None),
+    after_id: Annotated[int | None, Query(ge=0)] = None,
+    before_created_at: datetime | None = Query(default=None),
+    before_id: Annotated[int | None, Query(ge=0)] = None,
 ):
     return list_messages(
         db=db,
@@ -56,4 +62,9 @@ def read_messages(
         conversation_id=conversation_id,
         limit=limit,
         offset=offset,
+        latest=latest,
+        after_created_at=after_created_at,
+        after_id=after_id,
+        before_created_at=before_created_at,
+        before_id=before_id,
     )

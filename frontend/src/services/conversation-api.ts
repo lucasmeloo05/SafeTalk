@@ -32,6 +32,18 @@ export type MessageReportResponse = {
   created_at: string;
 };
 
+export type MessageCursor = {
+  direction: 'after' | 'before';
+  created_at: string;
+  id: number;
+};
+
+export type MessageListOptions = {
+  cursor?: MessageCursor;
+  signal?: AbortSignal;
+  latest?: boolean;
+};
+
 export async function listConversations(): Promise<ConversationResponse[]> {
   const response = await api.get<ConversationResponse[]>('/conversations/');
   return response.data;
@@ -49,11 +61,21 @@ export async function createDirectConversation(
 export async function listMessages(
   conversationId: number,
   limit: number,
-  offset: number,
+  offset?: number,
+  options: MessageListOptions = {},
 ): Promise<MessageResponse[]> {
+  const params: Record<string, number | string | boolean> = { limit };
+  if (offset !== undefined) params.offset = offset;
+  if (options.latest) params.latest = true;
+  if (options.cursor) {
+    params[`${options.cursor.direction}_created_at`] = options.cursor.created_at;
+    params[`${options.cursor.direction}_id`] = options.cursor.id;
+  }
+  const config: { params: Record<string, number | string | boolean>; signal?: AbortSignal } = { params };
+  if (options.signal) config.signal = options.signal;
   const response = await api.get<MessageResponse[]>(
     `/conversations/${conversationId}/messages`,
-    { params: { limit, offset } },
+    config,
   );
   return response.data;
 }

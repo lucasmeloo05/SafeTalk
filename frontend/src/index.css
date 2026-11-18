@@ -340,6 +340,7 @@ button.dashboard-nav__link { font-family: inherit; cursor: default; }
 .chat-message-state__icon { display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid #33435a; border-radius: 14px; color: #aabaff; background: #1a2940; }
 .chat-message-state--error > svg { color: #e59c9e; }
 .chat-notice { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #2e4b47; color: #a9d6ca; background: #142722; font-size: 9px; }
+.chat-poll-warning { padding: 7px 12px; border-bottom: 1px solid #514733; color: #d6c59f; background: #29251c; font-size: 9px; }
 .chat-notice > button { display: grid; width: 23px; height: 23px; flex: 0 0 23px; place-items: center; margin-left: auto; border: 0; border-radius: 5px; color: #94baaf; background: transparent; cursor: pointer; }
 .chat-notice > button:hover { background: #1d3932; }
 .chat-send-error { display: flex; align-items: center; gap: 6px; margin: 0; padding: 7px 14px 0; color: #e6a6a8; font-size: 9px; }

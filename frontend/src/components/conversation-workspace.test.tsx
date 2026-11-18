@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { MemoryRouter } from 'react-router-dom';
@@ -44,14 +44,15 @@ const conversation = {
   updated_at: '2026-11-16T10:00:00Z',
 };
 
-function message(id: number, senderId = 2, content = `Mensagem ${id}`) {
+function message(id: number, senderId = 2, content = `Mensagem ${id}`, conversationId = 10) {
+  const createdAt = new Date(Date.UTC(2026, 10, 16, 10, 0, id)).toISOString();
   return {
     id,
-    conversation_id: 10,
+    conversation_id: conversationId,
     sender_id: senderId,
     content,
-    created_at: `2026-11-16T10:${String(id % 60).padStart(2, '0')}:00Z`,
-    updated_at: `2026-11-16T10:${String(id % 60).padStart(2, '0')}:00Z`,
+    created_at: createdAt,
+    updated_at: createdAt,
     edited_at: null,
     is_deleted_for_everyone: false,
   };
@@ -66,7 +67,12 @@ function renderWorkspace() {
 }
 
 describe('fluxos do painel de conversas', () => {
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+  });
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -81,7 +87,7 @@ describe('fluxos do painel de conversas', () => {
     renderWorkspace();
 
     expect(await screen.findByRole('button', { name: 'Abrir conversa com Usuário #2' })).toBeInTheDocument();
-    await waitFor(() => expect(serviceMock.listMessages).toHaveBeenCalledWith(10, 50, 0));
+    await waitFor(() => expect(serviceMock.listMessages).toHaveBeenCalledWith(10, 50, undefined, { latest: true }));
     expect(screen.getByText('Esta conversa ainda não tem mensagens')).toBeInTheDocument();
   });
 
@@ -107,20 +113,26 @@ describe('fluxos do painel de conversas', () => {
     expect(composer).toHaveAttribute('maxlength', '5000');
   });
 
-  it('solicita a próxima página usando o offset da API e preserva a ordem', async () => {
+  it('solicita mensagens anteriores pelo cursor composto e preserva a ordem', async () => {
     serviceMock.listMessages
-      .mockResolvedValueOnce(Array.from({ length: 50 }, (_, index) => message(index + 1)))
-      .mockResolvedValueOnce([message(51)]);
+      .mockResolvedValueOnce(Array.from({ length: 50 }, (_, index) => message(index + 51)))
+      .mockResolvedValueOnce([message(1)]);
     const user = userEvent.setup();
     renderWorkspace();
-    await screen.findByText('Mensagem 1');
+    await screen.findByText('Mensagem 51');
     await user.click(screen.getByRole('button', { name: 'Carregar mais mensagens' }));
 
-    expect(await screen.findByText('Mensagem 51')).toBeInTheDocument();
-    expect(serviceMock.listMessages).toHaveBeenNthCalledWith(2, 10, 50, 50);
+    expect(await screen.findByText('Mensagem 1')).toBeInTheDocument();
+    expect(serviceMock.listMessages).toHaveBeenNthCalledWith(2, 10, 50, undefined, {
+      cursor: {
+        direction: 'before',
+        created_at: message(51).created_at,
+        id: 51,
+      },
+    });
     const contents = screen.getAllByText(/^Mensagem \d+$/);
     expect(contents[0]).toHaveTextContent('Mensagem 1');
-    expect(contents.at(-1)).toHaveTextContent('Mensagem 51');
+    expect(contents.at(-1)).toHaveTextContent('Mensagem 100');
   });
 
   it('denuncia pelo ID da mensagem e envia somente o motivo informado', async () => {
@@ -187,5 +199,216 @@ describe('fluxos do painel de conversas', () => {
     await waitFor(() => expect(serviceMock.createDirectConversation).toHaveBeenCalledWith(42));
     expect(screen.queryByRole('dialog', { name: 'Iniciar conversa' })).not.toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Abrir conversa com Usuário #42' })).toBeInTheDocument();
+  });
+
+  it('recebe mensagens automaticamente, deduplica IDs e mantém ordem cronológica', async () => {
+    vi.useFakeTimers();
+    serviceMock.listMessages
+      .mockResolvedValueOnce([message(1)])
+      .mockResolvedValueOnce([message(1), message(2)]);
+    renderWorkspace();
+
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText('Mensagem 1')).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByText('Mensagem 2')).toBeInTheDocument();
+    expect(screen.getAllByText('Mensagem 1')).toHaveLength(1);
+    const displayed = screen.getAllByText(/^Mensagem [12]$/);
+    expect(displayed.map((item) => item.textContent)).toEqual(['Mensagem 1', 'Mensagem 2']);
+    expect(serviceMock.listMessages).toHaveBeenLastCalledWith(
+      10,
+      50,
+      undefined,
+      {
+        cursor: { direction: 'after', created_at: message(1).created_at, id: 1 },
+        signal: expect.any(AbortSignal),
+      },
+    );
+  });
+
+  it('não avança o cursor pelo envio próprio antes de sincronizar mensagens recebidas', async () => {
+    vi.useFakeTimers();
+    const ownReply = message(3, 1, 'Resposta própria');
+    serviceMock.listMessages
+      .mockResolvedValueOnce([message(1)])
+      .mockResolvedValueOnce([message(2, 2, 'Recebida antes'), ownReply]);
+    serviceMock.sendMessage.mockResolvedValueOnce(ownReply);
+    renderWorkspace();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Mensagem' }), {
+      target: { value: 'Resposta própria' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar mensagem' }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getAllByText('Resposta própria')).toHaveLength(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+
+    expect(screen.getByText('Recebida antes')).toBeInTheDocument();
+    expect(screen.getAllByText('Resposta própria')).toHaveLength(1);
+    expect(serviceMock.listMessages).toHaveBeenLastCalledWith(
+      10,
+      50,
+      undefined,
+      {
+        cursor: { direction: 'after', created_at: message(1).created_at, id: 1 },
+        signal: expect.any(AbortSignal),
+      },
+    );
+  });
+
+  it('não inicia uma segunda consulta enquanto o polling atual ainda está pendente', async () => {
+    vi.useFakeTimers();
+    let resolvePoll!: (value: ReturnType<typeof message>[]) => void;
+    serviceMock.listMessages
+      .mockResolvedValueOnce([message(1)])
+      .mockImplementationOnce(() => new Promise((resolve) => { resolvePoll = resolve; }))
+      .mockResolvedValueOnce([]);
+    renderWorkspace();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(2);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(9000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(2);
+
+    await act(async () => { resolvePoll([message(2)]); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(3);
+  });
+
+  it('ignora uma resposta de polling atrasada após selecionar outra conversa', async () => {
+    vi.useFakeTimers();
+    let resolveOldPoll!: (value: ReturnType<typeof message>[]) => void;
+    serviceMock.listConversations.mockResolvedValue([
+      conversation,
+      { ...conversation, id: 20, user_b_id: 3 },
+    ]);
+    serviceMock.listMessages.mockImplementation((conversationId: number) => {
+      if (conversationId === 20) return Promise.resolve([message(20, 3, 'Mensagem da B', 20)]);
+      if (serviceMock.listMessages.mock.calls.filter(([id]) => id === 10).length === 1) {
+        return Promise.resolve([message(1, 2, 'Mensagem inicial de A')]);
+      }
+      return new Promise((resolve) => { resolveOldPoll = resolve; });
+    });
+    renderWorkspace();
+
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText('Mensagem inicial de A')).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(resolveOldPoll).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir conversa com Usuário #3' }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText('Mensagem da B')).toBeInTheDocument();
+    await act(async () => { resolveOldPoll([message(2, 2, 'Resposta atrasada de A')]); await Promise.resolve(); });
+
+    expect(screen.getByText('Mensagem da B')).toBeInTheDocument();
+    expect(screen.queryByText('Resposta atrasada de A')).not.toBeInTheDocument();
+    expect(screen.queryByText('Mensagem inicial de A')).not.toBeInTheDocument();
+  });
+
+  it('pausa quando a aba está oculta e retoma quando volta a ficar visível', async () => {
+    vi.useFakeTimers();
+    serviceMock.listMessages.mockResolvedValueOnce([message(1)]).mockResolvedValue([message(1)]);
+    renderWorkspace();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const initialCalls = serviceMock.listMessages.mock.calls.length;
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    fireEvent(document, new Event('visibilitychange'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(initialCalls);
+
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    fireEvent(document, new Event('visibilitychange'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(initialCalls + 1);
+  });
+
+  it('pausa offline e retoma a consulta ao recuperar a conexão', async () => {
+    vi.useFakeTimers();
+    serviceMock.listMessages.mockResolvedValue([message(1)]);
+    renderWorkspace();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const initialCalls = serviceMock.listMessages.mock.calls.length;
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(initialCalls);
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+    fireEvent(window, new Event('online'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(initialCalls + 1);
+  });
+
+  it('recupera falha de rede no polling sem descartar mensagens carregadas', async () => {
+    vi.useFakeTimers();
+    serviceMock.listMessages
+      .mockResolvedValueOnce([message(1)])
+      .mockRejectedValueOnce(new Error('rede indisponível'))
+      .mockResolvedValueOnce([message(2)]);
+    renderWorkspace();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(screen.getByText(/Atualização automática pausada temporariamente/)).toBeInTheDocument();
+    expect(screen.getByText('Mensagem 1')).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(screen.getByText('Mensagem 2')).toBeInTheDocument();
+    expect(screen.queryByText(/Atualização automática pausada temporariamente/)).not.toBeInTheDocument();
+  });
+
+  it('HTTP 403 encerra o polling e limpa as mensagens e estados da conversa', async () => {
+    vi.useFakeTimers();
+    serviceMock.listMessages
+      .mockResolvedValueOnce([message(1)])
+      .mockRejectedValueOnce(new ApiError('Acesso negado', 403));
+    renderWorkspace();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Opções da mensagem 1' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Denunciar mensagem' }));
+    expect(screen.getByRole('dialog', { name: 'Denunciar mensagem' })).toBeInTheDocument();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Você perdeu o acesso a esta conversa');
+    expect(screen.queryByText('Mensagem 1')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Denunciar mensagem' })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Mensagem' })).toBeDisabled();
+    const callsAfterForbidden = serviceMock.listMessages.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(9000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(callsAfterForbidden);
+  });
+
+  it('encerra o timer de polling ao desmontar o painel', async () => {
+    vi.useFakeTimers();
+    serviceMock.listMessages.mockResolvedValue([message(1)]);
+    const view = renderWorkspace();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const callsBeforeUnmount = serviceMock.listMessages.mock.calls.length;
+    view.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(callsBeforeUnmount);
+  });
+
+  it('encerra o polling quando a sessão autenticada termina', async () => {
+    vi.useFakeTimers();
+    serviceMock.listMessages.mockResolvedValue([message(1)]);
+    const view = renderWorkspace();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const callsBeforeLogout = serviceMock.listMessages.mock.calls.length;
+    authMock.mockReturnValue({ user: null });
+    view.rerender(
+      <MemoryRouter>
+        <ConversationWorkspace createDialogOpen={false} onCreateDialogOpenChange={vi.fn()} />
+      </MemoryRouter>,
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(serviceMock.listMessages).toHaveBeenCalledTimes(callsBeforeLogout);
   });
 });

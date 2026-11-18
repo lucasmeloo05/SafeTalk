@@ -25,6 +25,20 @@ import {
 } from '@/services/conversation-api';
 
 const PAGE_SIZE = 50;
+export const MESSAGE_POLL_INTERVAL_MS = 3000;
+type MessagePosition = Pick<MessageResponse, 'created_at' | 'id'>;
+
+function compareMessagePositions(left: MessagePosition, right: MessagePosition) {
+  const timeOrder = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+  return timeOrder || left.id - right.id;
+}
+
+function sortConversationsByActivity(items: ConversationResponse[]) {
+  return [...items].sort((left, right) => {
+    const timeOrder = new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+    return timeOrder || right.id - left.id;
+  });
+}
 
 function describeConversation(conversation: ConversationResponse, userId: number) {
   if (conversation.type === 'DIRECT') {
@@ -75,9 +89,17 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
   const [messages, setMessages] = useState<MessageResponse[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const [accessLostForId, setAccessLostForId] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [nextOffset, setNextOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+  const [messagesLoadedForId, setMessagesLoadedForId] = useState<number | null>(null);
+  const [pollingAvailable, setPollingAvailable] = useState(
+    () => typeof document === 'undefined' || (!document.hidden && navigator.onLine),
+  );
+  const oldestMessageRef = useRef<MessagePosition | null>(null);
+  const newestMessageRef = useRef<MessagePosition | null>(null);
+  const accessLostRef = useRef<number | null>(null);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -120,21 +142,44 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
 
   useEffect(() => {
     if (conversations.length === 0) {
+      selectedIdRef.current = null;
       setSelectedId(null);
       return;
     }
     if (selectedId === null || !conversations.some((conversation) => conversation.id === selectedId)) {
+      selectedIdRef.current = conversations[0].id;
       setSelectedId(conversations[0].id);
     }
   }, [conversations, selectedId]);
 
   useEffect(() => {
+    const updateAvailability = () => {
+      setPollingAvailable(!document.hidden && navigator.onLine);
+    };
+    document.addEventListener('visibilitychange', updateAvailability);
+    window.addEventListener('online', updateAvailability);
+    window.addEventListener('offline', updateAvailability);
+    updateAvailability();
+    return () => {
+      document.removeEventListener('visibilitychange', updateAvailability);
+      window.removeEventListener('online', updateAvailability);
+      window.removeEventListener('offline', updateAvailability);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (accessLostRef.current !== selectedId) {
+      accessLostRef.current = null;
+      setAccessLostForId(null);
+    }
     selectedIdRef.current = selectedId;
     if (selectedId === null) {
       setMessages([]);
       setMessagesError(null);
-      setNextOffset(0);
       setHasMore(false);
+      setMessagesLoadedForId(null);
+      oldestMessageRef.current = null;
+      newestMessageRef.current = null;
       return;
     }
 
@@ -142,41 +187,158 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
     setMessages([]);
     setMessagesLoading(true);
     setMessagesError(null);
+    setPollError(null);
     setSendError(null);
     setDraft('');
-    setNextOffset(0);
     setHasMore(false);
+    setMessagesLoadedForId(null);
+    oldestMessageRef.current = null;
+    newestMessageRef.current = null;
 
-    listMessages(selectedId, PAGE_SIZE, 0)
+    // The explicit latest flag requests the newest chronological window while
+    // preserving the original offset behavior for existing API clients.
+    listMessages(selectedId, PAGE_SIZE, undefined, { latest: true })
       .then((page) => {
-        if (!active) return;
+        if (!active || selectedIdRef.current !== selectedId) return;
         setMessages(mergeMessages([], page));
-        setNextOffset(page.length);
+        oldestMessageRef.current = page[0] ?? null;
+        newestMessageRef.current = page.at(-1)
+          ? { created_at: page.at(-1)!.created_at, id: page.at(-1)!.id }
+          : selectedConversation
+            ? { created_at: selectedConversation.created_at, id: 0 }
+            : null;
         setHasMore(page.length === PAGE_SIZE);
+        setMessagesLoadedForId(selectedId);
       })
       .catch((error: unknown) => {
-        if (active) setMessagesError(getErrorMessage(error, 'Não foi possível carregar as mensagens.'));
+        if (active && selectedIdRef.current === selectedId) {
+          setMessagesError(getErrorMessage(error, 'Não foi possível carregar as mensagens.'));
+        }
       })
       .finally(() => {
-        if (active) setMessagesLoading(false);
+        if (active && selectedIdRef.current === selectedId) setMessagesLoading(false);
       });
 
     return () => { active = false; };
-  }, [selectedId, messageRequestAttempt]);
+  }, [selectedId, messageRequestAttempt, selectedConversation?.created_at]);
+
+  useEffect(() => {
+    if (
+      selectedId === null
+      || user === null
+      || messagesLoadedForId !== selectedId
+      || !pollingAvailable
+      || accessLostForId === selectedId
+    ) return;
+
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let controller: AbortController | undefined;
+
+    const scheduleNext = () => {
+      if (active) timer = setTimeout(() => { void poll(); }, MESSAGE_POLL_INTERVAL_MS);
+    };
+    const poll = async () => {
+      if (!active || selectedIdRef.current !== selectedId || controller) return;
+      const cursor = newestMessageRef.current;
+      if (!cursor) {
+        scheduleNext();
+        return;
+      }
+      controller = new AbortController();
+      const requestController = controller;
+      try {
+        const incoming = await listMessages(
+          selectedId,
+          PAGE_SIZE,
+          undefined,
+          {
+            cursor: { direction: 'after', created_at: cursor.created_at, id: cursor.id },
+            signal: requestController.signal,
+          },
+        );
+        if (!active || selectedIdRef.current !== selectedId) return;
+        setPollError(null);
+        if (incoming.length > 0) {
+          setMessages((current) => mergeMessages(current, incoming));
+          const latest = incoming.at(-1)!;
+          if (!newestMessageRef.current || compareMessagePositions(latest, newestMessageRef.current) > 0) {
+            newestMessageRef.current = { created_at: latest.created_at, id: latest.id };
+          }
+          setConversations((current) => sortConversationsByActivity(current.map((conversation) => (
+            conversation.id === selectedId && new Date(latest.created_at).getTime() > new Date(conversation.updated_at).getTime()
+              ? { ...conversation, updated_at: latest.created_at }
+              : conversation
+          ))));
+        }
+      } catch (error) {
+        if (active && selectedIdRef.current === selectedId && !requestController.signal.aborted) {
+          if (error instanceof ApiError && error.status === 403) {
+            active = false;
+            accessLostRef.current = selectedId;
+            setAccessLostForId(selectedId);
+            setMessages([]);
+            setMessagesError(null);
+            setPollError(null);
+            setMessagesLoading(false);
+            setSendError(null);
+            setDraft('');
+            setHasMore(false);
+            setLoadingMore(false);
+            setSending(false);
+            setOpenMessageMenu(null);
+            setReportTarget(null);
+            setReportReason('');
+            setReportError(null);
+            setReportSending(false);
+            setNotice(null);
+            setMessagesLoadedForId(null);
+            oldestMessageRef.current = null;
+            newestMessageRef.current = null;
+            return;
+          }
+          setPollError(getErrorMessage(error, 'Atualização automática indisponível. Tentaremos novamente.'));
+        }
+      } finally {
+        if (controller === requestController) controller = undefined;
+        scheduleNext();
+      }
+    };
+
+    scheduleNext();
+    return () => {
+      active = false;
+      if (timer !== undefined) clearTimeout(timer);
+      controller?.abort();
+    };
+  }, [selectedId, user?.id, messagesLoadedForId, pollingAvailable, accessLostForId]);
 
   async function handleLoadMore() {
-    if (selectedId === null || loadingMore || !hasMore) return;
+    if (
+      selectedId === null
+      || accessLostRef.current === selectedId
+      || loadingMore
+      || !hasMore
+      || !oldestMessageRef.current
+    ) return;
     const conversationId = selectedId;
+    const cursor = oldestMessageRef.current;
     setLoadingMore(true);
     setMessagesError(null);
     try {
-      const page = await listMessages(conversationId, PAGE_SIZE, nextOffset);
-      if (selectedIdRef.current !== conversationId) return;
+      const page = await listMessages(conversationId, PAGE_SIZE, undefined, {
+        cursor: {
+          direction: 'before',
+          created_at: cursor.created_at,
+          id: cursor.id,
+        },
+      });
+      if (selectedIdRef.current !== conversationId || accessLostRef.current === conversationId) return;
       setMessages((current) => mergeMessages(current, page));
-      setNextOffset((current) => current + page.length);
+      if (page.length > 0) oldestMessageRef.current = { created_at: page[0].created_at, id: page[0].id };
       setHasMore(page.length === PAGE_SIZE);
     } catch (error) {
-      if (selectedIdRef.current === conversationId) {
+      if (selectedIdRef.current === conversationId && accessLostRef.current !== conversationId) {
         setMessagesError(getErrorMessage(error, 'Não foi possível carregar mais mensagens.'));
       }
     } finally {
@@ -186,7 +348,7 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
 
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (selectedId === null) return;
+    if (selectedId === null || accessLostRef.current === selectedId) return;
     const conversationId = selectedId;
     const content = draft.trim();
     if (!content || content.length > 5000 || sending) return;
@@ -196,16 +358,17 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
     setNotice(null);
     try {
       const created = await sendMessage(conversationId, content);
-      if (selectedIdRef.current !== conversationId) return;
+      if (selectedIdRef.current !== conversationId || accessLostRef.current === conversationId) return;
       setMessages((current) => mergeMessages(current, [created]));
+      // The POST confirms only this message, not every message after the
+      // polling cursor. Leave the cursor for the next server read to advance.
       setDraft('');
-      setConversations((current) => current
+      setConversations((current) => sortConversationsByActivity(current
         .map((conversation) => conversation.id === conversationId
           ? { ...conversation, updated_at: created.created_at }
-          : conversation)
-        .sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime()));
+          : conversation)));
     } catch (error) {
-      if (selectedIdRef.current === conversationId) {
+      if (selectedIdRef.current === conversationId && accessLostRef.current !== conversationId) {
         setSendError(getErrorMessage(error, 'Não foi possível enviar a mensagem.'));
       }
     } finally {
@@ -215,7 +378,8 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
 
   async function handleReport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!reportTarget) return;
+    if (!reportTarget || (selectedId !== null && accessLostRef.current === selectedId)) return;
+    const conversationId = selectedId;
     const reason = reportReason.trim();
     if (!reason || reason.length > 500 || reportSending) return;
 
@@ -223,11 +387,14 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
     setReportError(null);
     try {
       await reportMessage(reportTarget.id, reason);
+      if (selectedId !== null && accessLostRef.current === selectedId) return;
       setReportTarget(null);
       setReportReason('');
       setNotice('Denúncia enviada. Obrigado por ajudar a manter o SafeTalk seguro.');
     } catch (error) {
-      setReportError(getErrorMessage(error, 'Não foi possível enviar a denúncia.'));
+      if (conversationId === null || accessLostRef.current !== conversationId) {
+        setReportError(getErrorMessage(error, 'Não foi possível enviar a denúncia.'));
+      }
     } finally {
       setReportSending(false);
     }
@@ -249,6 +416,7 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
         conversation,
         ...current.filter((item) => item.id !== conversation.id),
       ].sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime()));
+      selectedIdRef.current = conversation.id;
       setSelectedId(conversation.id);
       onCreateDialogOpenChange(false);
       setRecipientId('');
@@ -305,7 +473,7 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
                     key={conversation.id}
                     className={`conversation-list-item${selectedId === conversation.id ? ' is-selected' : ''}`}
                     type="button"
-                    onClick={() => setSelectedId(conversation.id)}
+                    onClick={() => { selectedIdRef.current = conversation.id; setSelectedId(conversation.id); }}
                     aria-label={`Abrir conversa com ${title}`}
                     aria-current={selectedId === conversation.id ? 'page' : undefined}
                   >
@@ -337,6 +505,8 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
 
               {notice && <div className="chat-notice" role="status"><Check size={15} />{notice}<button type="button" onClick={() => setNotice(null)} aria-label="Fechar aviso"><X size={14} /></button></div>}
 
+              {pollError && <div className="chat-poll-warning" role="status">Atualização automática pausada temporariamente: {pollError}</div>}
+
               <div className="chat-messages" aria-live="polite">
                 {hasMore && !messagesLoading && (
                   <button className="chat-load-more" type="button" onClick={() => void handleLoadMore()} disabled={loadingMore}>
@@ -344,7 +514,12 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
                     {loadingMore ? 'Carregando…' : 'Carregar mais mensagens'}
                   </button>
                 )}
-                {messagesLoading ? (
+                {accessLostForId === selectedId ? (
+                  <div className="chat-message-state chat-message-state--error" role="alert">
+                    <AlertCircle size={20} />
+                    <p>Você perdeu o acesso a esta conversa. As mensagens carregadas foram removidas desta tela.</p>
+                  </div>
+                ) : messagesLoading ? (
                   <div className="chat-message-state" role="status"><LoaderCircle className="spin" size={20} /><span>Carregando mensagens…</span></div>
                 ) : messagesError ? (
                   <div className="chat-message-state chat-message-state--error" role="alert"><AlertCircle size={20} /><p>{messagesError}</p><button type="button" onClick={() => setMessageRequestAttempt((attempt) => attempt + 1)}>Tentar novamente</button></div>
@@ -405,11 +580,11 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
                   maxLength={5000}
                   rows={2}
                   onChange={(event) => setDraft(event.target.value)}
-                  disabled={messagesLoading || Boolean(messagesError) || sending}
+                  disabled={accessLostForId === selectedId || messagesLoading || Boolean(messagesError) || sending}
                 />
                 <div className="chat-composer__footer">
                   <span>{draft.length.toLocaleString('pt-BR')} / 5.000</span>
-                  <button type="submit" disabled={!draft.trim() || draft.length > 5000 || sending || messagesLoading || Boolean(messagesError)} aria-label="Enviar mensagem">
+                  <button type="submit" disabled={accessLostForId === selectedId || !draft.trim() || draft.length > 5000 || sending || messagesLoading || Boolean(messagesError)} aria-label="Enviar mensagem">
                     {sending ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}
                     <span>{sending ? 'Enviando…' : 'Enviar'}</span>
                   </button>
