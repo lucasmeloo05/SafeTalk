@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Plus,
   ShieldCheck,
@@ -8,7 +9,20 @@ import { ConversationWorkspace } from '@/components/conversation-workspace';
 import { DashboardLayout } from '@/components/dashboard-layout';
 
 export function HomePage() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [initialConversationId] = useState<number | undefined>(() =>
+    typeof location.state?.openConversationId === 'number'
+      ? location.state.openConversationId
+      : undefined,
+  );
   const [createConversationOpen, setCreateConversationOpen] = useState(false);
+
+  useEffect(() => {
+    if (initialConversationId !== undefined && location.state !== null) {
+      navigate('/app', { replace: true, state: null });
+    }
+  }, [initialConversationId, location.state, navigate]);
 
   return (
     <DashboardLayout
@@ -34,6 +48,7 @@ export function HomePage() {
       <ConversationWorkspace
         createDialogOpen={createConversationOpen}
         onCreateDialogOpenChange={setCreateConversationOpen}
+        initialConversationId={initialConversationId}
       />
     </DashboardLayout>
   );

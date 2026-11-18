@@ -58,10 +58,10 @@ function message(id: number, senderId = 2, content = `Mensagem ${id}`, conversat
   };
 }
 
-function renderWorkspace() {
+function renderWorkspace(initialConversationId?: number) {
   return render(
     <MemoryRouter>
-      <ConversationWorkspace createDialogOpen={false} onCreateDialogOpenChange={vi.fn()} />
+      <ConversationWorkspace createDialogOpen={false} onCreateDialogOpenChange={vi.fn()} initialConversationId={initialConversationId} />
     </MemoryRouter>,
   );
 }
@@ -227,6 +227,49 @@ describe('fluxos do painel de conversas', () => {
         signal: expect.any(AbortSignal),
       },
     );
+  });
+
+  it('seleciona initialConversationId quando a lista chega com latência', async () => {
+    let resolveConversations!: (value: Array<typeof conversation>) => void;
+    serviceMock.listConversations.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveConversations = resolve; }),
+    );
+    renderWorkspace(20);
+
+    await waitFor(() => expect(resolveConversations).toBeDefined());
+    await act(async () => {
+      resolveConversations([
+        conversation,
+        { ...conversation, id: 20, user_b_id: 3 },
+      ]);
+    });
+
+    const requested = await screen.findByRole('button', { name: 'Abrir conversa com Usuário #3' });
+    expect(requested).toHaveAttribute('aria-current', 'page');
+    await waitFor(() => expect(serviceMock.listMessages).toHaveBeenCalledWith(20, 50, undefined, { latest: true }));
+  });
+
+  it('não sobrescreve seleção manual após atualizar a lista de conversas', async () => {
+    serviceMock.listConversations.mockResolvedValue([
+      conversation,
+      { ...conversation, id: 20, user_b_id: 3 },
+    ]);
+    serviceMock.listMessages.mockImplementation(async (conversationId: number) =>
+      conversationId === 10 ? [message(1)] : [message(20, 3, 'Mensagem de B', 20)],
+    );
+    serviceMock.sendMessage.mockImplementationOnce(async (_id: number, content: string) => message(21, 1, content, 20));
+    const user = userEvent.setup();
+    renderWorkspace(10);
+    expect(await screen.findByRole('button', { name: 'Abrir conversa com Usuário #2' })).toHaveAttribute('aria-current', 'page');
+
+    await user.click(screen.getByRole('button', { name: 'Abrir conversa com Usuário #3' }));
+    expect(await screen.findByText('Mensagem de B')).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox', { name: 'Mensagem' }), 'Atualização de B');
+    await user.click(screen.getByRole('button', { name: 'Enviar mensagem' }));
+    expect(await screen.findByText('Atualização de B')).toBeInTheDocument();
+
+    expect(screen.getByRole('button', { name: 'Abrir conversa com Usuário #3' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByText('Mensagem de B')).toBeInTheDocument();
   });
 
   it('não avança o cursor pelo envio próprio antes de sincronizar mensagens recebidas', async () => {

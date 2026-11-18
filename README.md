@@ -10,6 +10,8 @@ O objetivo do SafeTalk é oferecer comunicação privada e recursos de comunidad
 
 ### Implementado
 
+- Na página Pessoas, usuários autenticados podem buscar usernames, navegar por amigos e solicitações, enviar, aceitar, recusar ou cancelar pedidos, remover amizades e abrir conversas diretas. As preferências permitem controlar pedidos de amizade e conversas iniciadas por desconhecidos.
+
 - Cadastro, login JWT e perfil autenticado.
 - Conversas privadas: criação/recuperação de conversa direta, listagem, leitura e envio de mensagens.
 - Denúncia de mensagem privada por participante autorizado, com evidência baseada no registro original e preservada separadamente.
@@ -20,7 +22,7 @@ O objetivo do SafeTalk é oferecer comunicação privada e recursos de comunidad
 
 ### Parcial
 
-- Há modelos de amizades, bloqueios e preferências de privacidade, e as regras existentes são aplicadas em operações de conversa. Não há APIs completas para gerenciar amizades, bloqueios ou todas as preferências.
+- O backend aplica os bloqueios existentes à busca e às conversas diretas. O gerenciamento de bloqueios pelo usuário ainda está pendente.
 - A interface oferece autenticação, conversas/mensagens privadas e painel oficial. O acesso oficial é sempre validado pelo backend; a proteção de rota no navegador não concede autorização.
 
 ### Planejado ou ainda ausente

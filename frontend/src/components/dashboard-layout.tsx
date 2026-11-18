@@ -5,6 +5,7 @@ import {
   MessageCircle,
   MessagesSquare,
   ShieldCheck,
+  Users,
 } from 'lucide-react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '@/context/auth-context';
@@ -36,6 +37,11 @@ export function DashboardLayout({ title, description, children, headerAction }: 
             <MessagesSquare size={18} strokeWidth={1.8} />
             <span>Conversas</span>
             {location.pathname === '/app' && <span className="dashboard-nav__active-mark" aria-hidden="true" />}
+          </NavLink>
+          <NavLink to="/pessoas" className={({ isActive }) => `dashboard-nav__link${isActive ? ' is-active' : ''}`}>
+            <Users size={18} strokeWidth={1.8} />
+            <span>Pessoas</span>
+            {location.pathname === '/pessoas' && <span className="dashboard-nav__active-mark" aria-hidden="true" />}
           </NavLink>
           <NavLink to="/moderacao" className={({ isActive }) => `dashboard-nav__link${isActive ? ' is-active' : ''}`}>
             <ShieldCheck size={18} strokeWidth={1.8} />

@@ -77,15 +77,18 @@ function getErrorMessage(error: unknown, fallback: string) {
 type ConversationWorkspaceProps = {
   createDialogOpen: boolean;
   onCreateDialogOpenChange: (open: boolean) => void;
+  initialConversationId?: number;
 };
 
-export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChange }: ConversationWorkspaceProps) {
+export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChange, initialConversationId }: ConversationWorkspaceProps) {
   const { user } = useAuth();
   const [conversations, setConversations] = useState<ConversationResponse[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(true);
   const [conversationsError, setConversationsError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const selectedIdRef = useRef<number | null>(null);
+  const appliedInitialRef = useRef<number | null>(null);
+  const manualSelectionRef = useRef(false);
   const [messages, setMessages] = useState<MessageResponse[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
@@ -146,11 +149,22 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
       setSelectedId(null);
       return;
     }
+    if (
+      initialConversationId !== undefined
+      && appliedInitialRef.current !== initialConversationId
+      && !manualSelectionRef.current
+      && conversations.some((conversation) => conversation.id === initialConversationId)
+    ) {
+      appliedInitialRef.current = initialConversationId;
+      selectedIdRef.current = initialConversationId;
+      setSelectedId(initialConversationId);
+      return;
+    }
     if (selectedId === null || !conversations.some((conversation) => conversation.id === selectedId)) {
       selectedIdRef.current = conversations[0].id;
       setSelectedId(conversations[0].id);
     }
-  }, [conversations, selectedId]);
+  }, [conversations, selectedId, initialConversationId]);
 
   useEffect(() => {
     const updateAvailability = () => {
@@ -417,6 +431,7 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
         ...current.filter((item) => item.id !== conversation.id),
       ].sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime()));
       selectedIdRef.current = conversation.id;
+      manualSelectionRef.current = true;
       setSelectedId(conversation.id);
       onCreateDialogOpenChange(false);
       setRecipientId('');
@@ -473,7 +488,7 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
                     key={conversation.id}
                     className={`conversation-list-item${selectedId === conversation.id ? ' is-selected' : ''}`}
                     type="button"
-                    onClick={() => { selectedIdRef.current = conversation.id; setSelectedId(conversation.id); }}
+                    onClick={() => { manualSelectionRef.current = true; selectedIdRef.current = conversation.id; setSelectedId(conversation.id); }}
                     aria-label={`Abrir conversa com ${title}`}
                     aria-current={selectedId === conversation.id ? 'page' : undefined}
                   >

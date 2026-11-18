@@ -1,15 +1,16 @@
 # Status do projeto
 
-**Última atualização do status:** 17/11/2026.
+**Última atualização do status:** 18/11/2026.
 
-**Última execução completa dos testes conhecida:** `464 passed, 0 failed, 0 skipped`, no PostgreSQL isolado de testes `plataforma_tcc_test` (`127.0.0.1:55432`). Esse é um resultado histórico reportado antes desta atualização; os testes não foram executados novamente nesta tarefa documental.
-**Validações recentes reportadas, não equivalentes à suíte completa:** 32 testes backend aprovados nos testes de análise e API oficial; 32 testes frontend aprovados em 7 arquivos; `npm run build` aprovado. Também foi reportado teste real da integração OpenAI em duas denúncias de exemplo, preservadas como evidências no banco de desenvolvimento. Nenhum desses testes/estados foi reexecutado ou consultado nesta atualização.
+**Última validação completa reportada:** backend com 548 testes aprovados, frontend com 54 testes aprovados e build de produção aprovado. O teste de concorrência da criação recíproca de conversas também foi aprovado usando duas sessões PostgreSQL independentes.
+**Validação anterior:** `tests/test_social_api.py`: 16 passed no PostgreSQL isolado `plataforma_tcc_test` (`127.0.0.1:55432`); `social.test.tsx`: 4 passed; frontend completo: 50 passed em 8 arquivos; build aprovado. Esses resultados são históricos e foram substituídos pelos números acima.
+**Validações históricas reportadas:** 32 testes backend aprovados nos testes de análise e API oficial; 32 testes frontend aprovados em 7 arquivos. Também foi reportado teste real da integração OpenAI em duas denúncias de exemplo, preservadas como evidências no banco de desenvolvimento; essa evidência não foi consultada nesta atualização.
 **Última consulta ao estado Alembic do banco de desenvolvimento documentada:** 10/11/2026 (`bc365585aa97`, então head). A revisão `8a62d13e4f90` foi criada depois; o estado atual do banco de desenvolvimento não foi verificado nesta atualização documental.
 Este documento descreve o estado verificado nessa análise e deve ser atualizado após mudanças futuras.
 
 ## Resumo
 
-O repositório contém backend FastAPI com PostgreSQL, SQLAlchemy e Alembic, e frontend React/Vite/TypeScript/Tailwind. O backend oferece cadastro/login JWT, conversas e mensagens privadas, denúncias, fila de moderação oficial, triagem humana, análise elegível pela OpenAI e decisão humana auditável, além dos módulos de servidores. O frontend conecta autenticação, conversas/mensagens, envio de denúncia e painel oficial. A última regressão completa conhecida continua sendo o resultado histórico de 464 testes; validações mais recentes cobriram subconjuntos do backend e frontend e o build, conforme registrados acima. Não houve execução de testes nesta tarefa.
+O repositório contém backend FastAPI com PostgreSQL, SQLAlchemy e Alembic, e frontend React/Vite/TypeScript/Tailwind. O backend oferece cadastro/login JWT, conversas e mensagens privadas, denúncia e moderação oficial, além dos módulos de servidores e funcionalidades sociais. O frontend conecta autenticação, conversas/mensagens, envio de denúncia, painel oficial e gestão de amizades e preferências disponíveis. Os resultados da última validação estão registrados acima.
 
 ## Arquitetura observada
 
@@ -40,6 +41,17 @@ O repositório contém backend FastAPI com PostgreSQL, SQLAlchemy e Alembic, e f
 | `POST /users/` | Cadastra usuário e cria configurações de privacidade padrão | Não exigida |
 | `POST /users/login` | Aceita username ou e-mail e emite JWT válido por 30 minutos | Não exigida |
 | `GET /users/me` | Retorna o usuário autenticado | Bearer JWT |
+| `GET /users/search` | Busca usernames públicos com paginação `limit` 1–100 e `offset` >= 0; exige ao menos 2 caracteres após trim e exclui o próprio usuário e bloqueios em qualquer direção | Bearer JWT |
+| `GET /users/me/privacy` | Consulta as preferências de privacidade do usuário autenticado | Bearer JWT |
+| `PATCH /users/me/privacy` | Atualiza parcialmente `allow_messages_from_strangers` e/ou `allow_friend_requests` do próprio usuário | Bearer JWT |
+| `GET /social/friends` | Lista amizades aceitas paginadas | Bearer JWT |
+| `GET /social/requests/received` | Lista solicitações recebidas paginadas | Bearer JWT |
+| `GET /social/requests/sent` | Lista solicitações enviadas paginadas | Bearer JWT |
+| `POST /social/requests` | Envia uma solicitação de amizade, sujeita a bloqueios e à preferência do destinatário | Bearer JWT |
+| `POST /social/requests/{friendship_id}/accept` | Aceita uma solicitação recebida | Bearer JWT; participante da solicitação |
+| `POST /social/requests/{friendship_id}/reject` | Recusa uma solicitação recebida | Bearer JWT; participante da solicitação |
+| `DELETE /social/requests/{friendship_id}` | Cancela uma solicitação enviada | Bearer JWT; remetente da solicitação |
+| `DELETE /social/friends/{user_id}` | Remove uma amizade aceita | Bearer JWT; participante da amizade |
 | `POST /conversations/direct` | Cria ou retorna conversa individual, aplicando bloqueio, amizade e preferência do destinatário | Bearer JWT |
 | `GET /conversations/` | Lista conversas com participação ativa do usuário | Bearer JWT |
 | `POST /conversations/{conversation_id}/messages` | Envia mensagem após verificar participação e bloqueio | Bearer JWT |
@@ -122,8 +134,9 @@ Constraints existentes incluem unicidade de username/e-mail, não auto bloqueio,
 
 ## Implementação parcial: modelos presentes, API incompleta
 
-- **Amizades e bloqueios:** tabelas e constraints existem. Não há endpoints para gerenciar amizade/bloqueio. Bloqueios são consultados ao iniciar/reusar conversa direta, enviar mensagens e ler o histórico; um bloqueio em qualquer direção impede as três operações sem apagar mensagens. Amizades aceitas e privacidade do destinatário são verificadas antes de reativar uma participação `LEFT`.
-- **Privacidade:** preferências e defaults existem; não há API para lê-las ou atualizá-las. `allow_friend_requests`, `show_online_status` e `allow_group_invites` não são aplicados em rotas existentes.
+- **Amizades:** busca autenticada de usuários, envio, listagem paginada de amigos/solicitações, aceitação, recusa, cancelamento e remoção de amizade estão implementados nos endpoints `/users/search` e `/social/...`. A busca valida o mínimo após remover espaços, retorna dados públicos mínimos, pagina por `limit`/`offset` e considera somente relações `PENDING` ou `ACCEPTED`; relações `CANCELLED`, `REJECTED` ou `REMOVED` aparecem como `NONE`. A interface Pessoas oferece paginação para busca e listas, descarta respostas de busca obsoletas e atualiza uma solicitação aceita no resultado. Não há endpoints de gerenciamento de bloqueios.
+- **Privacidade:** `GET` e `PATCH /users/me/privacy` permitem ao usuário autenticado consultar e alterar suas próprias preferências `allow_messages_from_strangers` e `allow_friend_requests`. A segunda controla novas solicitações de amizade; a primeira participa da autorização para iniciar conversa direta. `show_online_status` e `allow_group_invites` continuam sem API funcional confirmada.
+- **Bloqueios:** os modelos existem e bloqueios são consultados ao iniciar/reusar conversa direta, enviar mensagens e ler o histórico; bloqueio em qualquer direção impede essas operações sem apagar mensagens. A API de criar/remover/listar bloqueios permanece pendente. Amizades aceitas e privacidade do destinatário são verificadas antes de reativar uma participação `LEFT`.
 - **Grupos:** tabelas de conversa, participante e convite existem; não há endpoint de criação ou gestão de grupos, participantes, papéis ou convites.
 - **Servidores e participação:** CRUD básico, listagem/consulta de membros ativos, saída voluntária, CRUD e atribuição/remoção manual de cargos, resolução de grants, configuração de `everyone_permissions`, convites, kick/ban/unban e consultas de moderação/auditoria estão implementados. Saída, atribuições, mutações de cargos, moderação e aceitação de convites usam transações e autorização no serviço. Permanecem pendentes transferência de propriedade, canais privados e mensagens de servidor. As regras e o estado detalhado estão em [ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md](ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md).
 - **Mensagens/exclusões:** envio e leitura estão disponíveis; existe tabela/campos para exclusão e timestamp de edição, mas não há endpoints/serviços para editar ou excluir, nem histórico de edição.
@@ -135,7 +148,7 @@ Constraints existentes incluem unicidade de username/e-mail, não auto bloqueio,
 - Continuar o módulo de servidores conforme [ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md](ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md): transferência de propriedade, canais privados, mensagens de servidor e funções ainda não confirmadas no código. CRUD de cargos, atribuição/remoção, núcleo de participação, resolução de permissões, configuração de `@everyone`, comparação hierárquica, moderação e convites estão implementados.
 - Gestão completa de grupos, incluindo convites e transferência de administração.
 - Edição e exclusão de mensagens com regras de autoria, permissões, janela de 15 minutos e histórico.
-- APIs para amizades, bloqueios e configurações de privacidade.
+- API de gerenciamento de bloqueios; aplicação funcional de `show_online_status` e `allow_group_invites`.
 - Transferência de propriedade, acesso/configuração de canais privados, mensagens de servidor e outras operações ainda não presentes no código.
 - Gestão de penalidades humanas além do registro genérico de decisão, appeals e pontuação de segurança; não há punição automática.
 - Verificação de idade e acesso a espaços +18; autenticação em dois fatores.
@@ -205,6 +218,6 @@ Consulta somente leitura ao banco de desenvolvimento realizada em 10/11/2026 ind
 
 ## Verificação desta análise
 
-- Última regressão completa reportada: **464 passed, 0 failed, 0 skipped**, exclusivamente em `plataforma_tcc_test` (`127.0.0.1:55432`). Esse resultado precede esta atualização documental e não foi repetido. A cobertura conhecida inclui cargos, convites e moderação, com testes de serviço/API e cenários de concorrência; testes não foram executados nesta tarefa.
+- Regressão completa histórica: **464 passed, 0 failed, 0 skipped**, exclusivamente em `plataforma_tcc_test` (`127.0.0.1:55432`), anterior às validações mais recentes registradas no início deste documento. A cobertura conhecida inclui cargos, convites e moderação, com testes de serviço/API e cenários de concorrência. Nenhum teste foi executado nesta atualização documental.
 - A URL de testes é validada pelo `tests/conftest.py` para `plataforma_tcc_test`, host local, porta 55432 e usuário `tcc_test`; o banco de desenvolvimento na porta 5433 não foi usado na execução documentada.
 - A revisão `990fa9af113d` foi validada em PostgreSQL 17 descartável por `upgrade head`, `downgrade 8a62d13e4f90` e novo `upgrade head`, todos com código zero; essa revisão não foi aplicada aos bancos de desenvolvimento ou testes. A revisão `d8f4c2b19a70` foi validada no ambiente PostgreSQL de testes em etapa posterior. O estado atual do banco de desenvolvimento não foi consultado nesta atualização documental.

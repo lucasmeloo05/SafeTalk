@@ -58,6 +58,74 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class UserDiscoveryResponse(BaseModel):
+    """Minimal profile fields safe to return in authenticated user search."""
+
+    id: int
+    username: str
+    relationship_status: Literal[
+        "NONE", "REQUEST_SENT", "REQUEST_RECEIVED", "FRIENDS"
+    ]
+    friendship_id: int | None = None
+
+
+class UserDiscoveryPage(BaseModel):
+    items: list[UserDiscoveryResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class FriendRequestCreate(BaseModel):
+    recipient_id: StrictInt = Field(gt=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class SocialUserItem(BaseModel):
+    friendship_id: int
+    user_id: int
+    username: str
+    created_at: datetime
+
+
+class SocialUserPage(BaseModel):
+    items: list[SocialUserItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class FriendshipActionResponse(BaseModel):
+    friendship_id: int
+    user_id: int
+    username: str
+    status: Literal["PENDING", "ACCEPTED", "REJECTED", "CANCELLED", "REMOVED"]
+    created_at: datetime
+    responded_at: datetime | None
+
+
+class UserPrivacySettingsResponse(BaseModel):
+    allow_messages_from_strangers: bool
+    allow_friend_requests: bool
+
+
+class UserPrivacySettingsUpdate(BaseModel):
+    allow_messages_from_strangers: StrictBool | None = None
+    allow_friend_requests: StrictBool | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_update_fields(self):
+        if not self.model_fields_set:
+            raise ValueError("Informe ao menos uma configuração.")
+        for field_name in self.model_fields_set:
+            if getattr(self, field_name) is None:
+                raise ValueError("As configurações não podem ser nulas.")
+        return self
+
+
 class UserLogin(BaseModel):
     login: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=1, max_length=128)

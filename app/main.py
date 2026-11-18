@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import engine
 from app.routers.users import router as users_router
+from app.routers.social import router as social_router
 from app.routers.conversations import router as conversations_router
 from app.routers.messages import router as messages_router
 from app.routers.servers import router as servers_router
@@ -75,6 +76,7 @@ app.add_middleware(
 )
 
 app.include_router(users_router)
+app.include_router(social_router)
 app.include_router(conversations_router)
 app.include_router(messages_router)
 app.include_router(servers_router)

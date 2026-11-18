@@ -26,7 +26,13 @@ def create_or_get_direct_conversation(
             detail="Você não pode criar uma conversa consigo mesmo.",
         )
 
-    recipient = db.get(User, recipient_id)
+    user_a_id, user_b_id = sorted((current_user.id, recipient_id))
+    # Mesma ordem das mutações de amizade, inclusive na abertura recíproca.
+    users = db.scalars(
+        select(User).where(User.id.in_((user_a_id, user_b_id)))
+        .order_by(User.id).with_for_update()
+    ).all()
+    recipient = next((user for user in users if user.id == recipient_id), None)
 
     if recipient is None or not recipient.is_active:
         raise HTTPException(
@@ -55,10 +61,6 @@ def create_or_get_direct_conversation(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Não é possível iniciar uma conversa com este usuário.",
         )
-
-    # Normaliza os IDs para consultar a amizade.
-    user_a_id = min(current_user.id, recipient_id)
-    user_b_id = max(current_user.id, recipient_id)
 
     friendship = db.scalar(
         select(Friendship).where(
