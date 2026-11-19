@@ -19,8 +19,27 @@ export type MessageResponse = {
   content: string;
   created_at: string;
   updated_at: string;
-  edited_at: string | null;
+  edited_at?: string | null;
   is_deleted_for_everyone: boolean;
+};
+
+export type ConversationMessageSync = {
+  items: MessageResponse[];
+  updates_revision: number;
+};
+
+export type MessageUpdateEvent = {
+  event_revision: number;
+  message_state_revision: number;
+  event_type: 'UPDATED' | 'DELETED';
+  message: MessageResponse;
+};
+
+export type MessageUpdateEventPage = {
+  items: MessageUpdateEvent[];
+  updates_revision: number;
+  next_cursor: number;
+  has_more: boolean;
 };
 
 export type MessageReportResponse = {
@@ -43,6 +62,31 @@ export type MessageListOptions = {
   signal?: AbortSignal;
   latest?: boolean;
 };
+
+export async function loadLatestMessagesWithRevision(
+  conversationId: number,
+  limit = 50,
+  signal?: AbortSignal,
+): Promise<ConversationMessageSync> {
+  const response = await api.get<ConversationMessageSync>(
+    `/conversations/${conversationId}/messages/sync`,
+    { params: { limit }, signal },
+  );
+  return response.data;
+}
+
+export async function listMessageUpdates(
+  conversationId: number,
+  afterRevision: number,
+  limit = 50,
+  signal?: AbortSignal,
+): Promise<MessageUpdateEventPage> {
+  const response = await api.get<MessageUpdateEventPage>(
+    `/conversations/${conversationId}/message-updates`,
+    { params: { after_revision: afterRevision, limit }, signal },
+  );
+  return response.data;
+}
 
 export async function listConversations(): Promise<ConversationResponse[]> {
   const response = await api.get<ConversationResponse[]>('/conversations/');
@@ -87,6 +131,35 @@ export async function sendMessage(
   const response = await api.post<MessageResponse>(
     `/conversations/${conversationId}/messages`,
     { content },
+  );
+  return response.data;
+}
+
+export type EditMessageResponse = {
+  message: MessageResponse;
+  message_state_revision: number;
+};
+
+export type MessageMutationResponse = EditMessageResponse;
+
+export async function editMessage(
+  conversationId: number,
+  messageId: number,
+  content: string,
+): Promise<EditMessageResponse> {
+  const response = await api.patch<EditMessageResponse>(
+    `/conversations/${conversationId}/messages/${messageId}`,
+    { content },
+  );
+  return response.data;
+}
+
+export async function deleteMessage(
+  conversationId: number,
+  messageId: number,
+): Promise<MessageMutationResponse> {
+  const response = await api.delete<MessageMutationResponse>(
+    `/conversations/${conversationId}/messages/${messageId}`,
   );
   return response.data;
 }

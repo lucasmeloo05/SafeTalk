@@ -11,6 +11,7 @@ from pydantic import (
     RootModel,
     StrictBool,
     StrictInt,
+    StrictStr,
     field_validator,
     model_validator,
 )
@@ -74,6 +75,11 @@ class UserDiscoveryPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class BlockedUser(BaseModel):
+    id: int
+    username: str
 
 
 class FriendRequestCreate(BaseModel):
@@ -168,6 +174,22 @@ class MessageCreate(BaseModel):
         return value
 
 
+class MessageEditRequest(BaseModel):
+    content: StrictStr = Field(min_length=1, max_length=5000)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("A mensagem não pode ficar vazia.")
+        if len(value) > 5000:
+            raise ValueError("A mensagem não pode exceder 5.000 caracteres.")
+        return value
+
+
 class MessageResponse(BaseModel):
     id: int
     conversation_id: int
@@ -179,6 +201,29 @@ class MessageResponse(BaseModel):
     is_deleted_for_everyone: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MessageUpdateEventItem(BaseModel):
+    event_revision: int
+    message_state_revision: int
+    event_type: Literal["UPDATED", "DELETED"]
+    message: MessageResponse
+
+
+class MessageUpdateEventPage(BaseModel):
+    items: list[MessageUpdateEventItem]
+    updates_revision: int
+    next_cursor: int
+    has_more: bool
+
+
+class MessageMutationResponse(BaseModel):
+    message: MessageResponse
+    message_state_revision: int
+
+
+class MessageEditResponse(MessageMutationResponse):
+    pass
 
 
 class ModerationReportCreate(BaseModel):

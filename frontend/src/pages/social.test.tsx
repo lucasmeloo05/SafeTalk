@@ -26,6 +26,7 @@ vi.mock('@/components/dashboard-layout', () => ({
 vi.mock('@/services/social-api', () => ({ ...socialMock, SOCIAL_PAGE_SIZE: 20 }));
 vi.mock('@/services/conversation-api', () => conversationMock);
 
+import { api } from '@/lib/api';
 import { SocialPage } from '@/pages/social';
 
 const privacy = { allow_messages_from_strangers: false, allow_friend_requests: true };
@@ -43,7 +44,39 @@ function renderPage() {
 }
 
 describe('página social', () => {
-  afterEach(() => cleanup());
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+  it('confirma bloqueio, remove a relação e permite desbloquear na lista privada', async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValue(true);
+    const put = vi.spyOn(api, 'put').mockResolvedValue({});
+    const del = vi.spyOn(api, 'delete').mockResolvedValue({});
+    vi.spyOn(api, 'get').mockResolvedValueOnce({ data: [{ id: friend.user_id, username: friend.username }] })
+      .mockResolvedValueOnce({ data: [] });
+    renderPage();
+    const block = await screen.findByRole('button', { name: 'Bloquear' });
+    await user.click(block);
+    expect(confirm).toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+    socialMock.listSocial.mockResolvedValue({ ...listPage, items: [], total: 0 });
+    await user.click(block);
+    expect(put).toHaveBeenCalledWith('/social/blocks/10');
+    await waitFor(() => expect(screen.queryByText(friend.username)).not.toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Privacidade' }));
+    expect(await screen.findByText(friend.username)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Desbloquear' }));
+    expect(del).toHaveBeenCalledWith('/social/blocks/10');
+    expect(await screen.findByText('Nenhum usuário bloqueado.')).toBeVisible();
+  });
+
+  it('mantém as ações da relação se o bloqueio falhar', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.spyOn(api, 'put').mockRejectedValue(new Error());
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'Bloquear' }));
+    expect(await screen.findByRole('alert')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Conversar' })).toBeEnabled();
+  });
 
   beforeEach(() => {
     vi.resetAllMocks();

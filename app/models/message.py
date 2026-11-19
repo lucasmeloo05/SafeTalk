@@ -6,6 +6,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    UniqueConstraint,
     Text,
     Index,
     func,
@@ -36,6 +37,7 @@ class Message(Base):
             "conversation_id",
             "created_at",
         ),
+        UniqueConstraint("id", "conversation_id", name="uq_messages_id_conversation"),
     )
 
     id: Mapped[int] = mapped_column(

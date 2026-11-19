@@ -173,7 +173,12 @@ def test_block_prevents_new_message_in_existing_conversation(
         recipient["id"],
     ).json()["id"]
     db_session.add(Block(blocker_id=sender["id"], blocked_id=recipient["id"]))
-    db_session.flush()
+    # Commit the setup savepoint before the requests. Both requests share the
+    # fixture Session, and a rejected message operation rolls that Session
+    # back; keeping the Block uncommitted would let the first request erase it
+    # before the second request runs. The outer fixture transaction still
+    # rolls this data back when the test ends.
+    db_session.commit()
 
     responses = [
         client.post(

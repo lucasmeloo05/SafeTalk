@@ -10,6 +10,8 @@ import {
   updatePrivacySettings, type SocialActionResponse, type PrivacySettings, type SocialListItem, type UserDiscovery,
 } from '@/services/social-api';
 
+import { BlockButton, BlockedUsers } from '@/components/user-blocks';
+
 type Tab = 'friends' | 'received' | 'sent' | 'privacy';
 type ListKind = Exclude<Tab, 'privacy'>;
 const errorText = (error: unknown) => error instanceof ApiError ? error.message : 'Não foi possível concluir a solicitação.';
@@ -122,6 +124,15 @@ export function SocialPage() {
     finally { setBusy(null); }
   }
 
+  const [blockRevision, setBlockRevision] = useState(0);
+  function afterBlock() {
+    handleQueryChange('');
+    friends.refresh();
+    sent.refresh();
+    received.refresh();
+    setBlockRevision(value => value + 1);
+  }
+
   async function openConversation(userId: number) {
     setBusy(`chat-${userId}`); setError('');
     try {
@@ -164,6 +175,8 @@ export function SocialPage() {
       <span className="social-avatar">{item.username.slice(0, 1).toUpperCase()}</span>
       <div className="social-person__identity"><strong>{item.username}</strong><span>{kind === 'friends' ? 'Amigo' : kind === 'received' ? 'Solicitação recebida' : 'Aguardando resposta'}</span></div>
       <div className="social-person__actions">
+        <BlockButton id={item.user_id} name={item.username} onBlocked={afterBlock} disabled={busy !== null}
+          onBusyChange={pending => setBusy(pending ? 'block' : null)} />
         {kind === 'friends' ? <>
           <button className="social-button social-button--primary" disabled={busy !== null} onClick={() => void openConversation(item.user_id)}><MessageCircle size={15} /> Conversar</button>
           <button className="social-icon-button" aria-label={`Remover ${item.username} dos amigos`} disabled={busy !== null} onClick={() => void runAction(`remove-${item.user_id}`, () => removeFriend(item.user_id))}><UserMinus size={16} /></button>
@@ -189,10 +202,13 @@ export function SocialPage() {
       {searching && <div className="social-loading"><LoaderCircle className="spin" size={19} /> Buscando pessoas…</div>}
       {!searching && !searchError && (results.length > 0 || searchOffset > 0) && <section className="social-search-results" aria-label="Resultados da busca"><h3>Resultados para “{submittedSearch}”</h3><div className="social-people-list">{results.map((person) => <article className="social-person" key={person.id}>
         <span className="social-avatar">{person.username.slice(0, 1).toUpperCase()}</span><div className="social-person__identity"><strong>{person.username}</strong><span>{person.relationship_status === 'FRIENDS' ? 'Já são amigos' : person.relationship_status === 'REQUEST_SENT' ? 'Solicitação enviada' : person.relationship_status === 'REQUEST_RECEIVED' ? 'Esta pessoa enviou uma solicitação' : 'Pessoa encontrada'}</span></div>
+        <BlockButton id={person.id} name={person.username} onBlocked={afterBlock} disabled={busy !== null}
+          onBusyChange={pending => setBusy(pending ? 'block' : null)} />
         {person.relationship_status === 'NONE' ? <button className="social-button social-button--primary" disabled={busy !== null} onClick={() => void runAction('request', () => sendFriendRequest(person.id))}><UserPlus size={15} /> Adicionar</button> : person.relationship_status === 'REQUEST_RECEIVED' && person.friendship_id !== null ? <button className="social-button social-button--primary" disabled={busy !== null} onClick={() => void runAction('accept', () => acceptFriendRequest(person.friendship_id!))}><Check size={15} /> Aceitar</button> : person.relationship_status === 'FRIENDS' ? <button className="social-button" disabled={busy !== null} onClick={() => void openConversation(person.id)}><MessageCircle size={15} /> Conversar</button> : <span className="social-status">Solicitação enviada</span>}
       </article>)}</div>{!results.length && <p>Não há resultados nesta página.</p>}{pagination('resultados da busca', searchTotal, searchOffset, (next) => { if (submittedSearch) void loadSearchPage(submittedSearch, next); }, searching)}</section>}
       {submittedSearch && searchOffset === 0 && results.length === 0 && !searching && !searchError && <p className="social-search-empty">Nenhum usuário encontrado. A busca mostra apenas usernames de contas disponíveis.</p>}
 
+      {tab === 'privacy' && <BlockedUsers key={blockRevision} onUnblocked={() => handleQueryChange('')} />}
       <section className="social-management">
         <nav className="social-tabs" aria-label="Gerenciar conexões">{tabs.map((item) => <button key={item.id} className={tab === item.id ? 'is-active' : ''} onClick={() => setTab(item.id)}>{item.label}{item.count !== undefined && <span>{item.count}</span>}</button>)}</nav>
         {error && <p className="social-error" role="alert">{error}</p>}

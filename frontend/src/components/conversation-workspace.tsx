@@ -7,17 +7,26 @@ import {
   MessageCircle,
   MessagesSquare,
   MoreHorizontal,
+  Pencil,
   Plus,
+  Save,
   Send,
   ShieldCheck,
+  Trash2,
   X,
 } from 'lucide-react';
 import { ApiError } from '@/lib/api';
+import { BlockButton } from '@/components/user-blocks';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/auth-context';
 import {
   createDirectConversation,
+  deleteMessage as deleteMessageRequest,
+  editMessage,
   listConversations,
+  listMessageUpdates,
   listMessages,
+  loadLatestMessagesWithRevision,
   reportMessage,
   sendMessage,
   type ConversationResponse,
@@ -25,6 +34,7 @@ import {
 } from '@/services/conversation-api';
 
 const PAGE_SIZE = 50;
+const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
 export const MESSAGE_POLL_INTERVAL_MS = 3000;
 type MessagePosition = Pick<MessageResponse, 'created_at' | 'id'>;
 
@@ -61,6 +71,13 @@ function formatDate(value: string) {
   }).format(date);
 }
 
+function isWithinEditWindow(message: MessageResponse, now: number) {
+  const createdAt = Date.parse(message.created_at);
+  return Number.isFinite(createdAt)
+    && !message.is_deleted_for_everyone
+    && now <= createdAt + MESSAGE_EDIT_WINDOW_MS;
+}
+
 function mergeMessages(current: MessageResponse[], incoming: MessageResponse[]) {
   const byId = new Map<number, MessageResponse>();
   for (const message of [...current, ...incoming]) byId.set(message.id, message);
@@ -82,6 +99,9 @@ type ConversationWorkspaceProps = {
 
 export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChange, initialConversationId }: ConversationWorkspaceProps) {
   const { user } = useAuth();
+  const authenticatedUserIdRef = useRef<number | null>(user?.id ?? null);
+  authenticatedUserIdRef.current = user?.id ?? null;
+  const navigate = useNavigate();
   const [conversations, setConversations] = useState<ConversationResponse[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(true);
   const [conversationsError, setConversationsError] = useState<string | null>(null);
@@ -90,6 +110,10 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
   const appliedInitialRef = useRef<number | null>(null);
   const manualSelectionRef = useRef(false);
   const [messages, setMessages] = useState<MessageResponse[]>([]);
+  const messagesRef = useRef<MessageResponse[]>([]);
+  const messageStateRevisionRef = useRef(new Map<number, number>());
+  const updatesCursorRef = useRef(0);
+  const pollingControllerRef = useRef<AbortController | null>(null);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
@@ -107,6 +131,14 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [openMessageMenu, setOpenMessageMenu] = useState<number | null>(null);
+  const [messageClock, setMessageClock] = useState(() => Date.now());
+  const [editingMessageId, setEditingMessageId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editingSaving, setEditingSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<MessageResponse | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [reportTarget, setReportTarget] = useState<MessageResponse | null>(null);
   const [reportReason, setReportReason] = useState('');
   const [reportError, setReportError] = useState<string | null>(null);
@@ -121,6 +153,33 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
     [conversations, selectedId],
   );
+
+  const commitMessages = useCallback((update: (current: MessageResponse[]) => MessageResponse[]) => {
+    const next = update(messagesRef.current);
+    messagesRef.current = next;
+    setMessages(next);
+  }, []);
+
+  useEffect(() => {
+    const nextExpiry = messages
+      .filter((message) => message.sender_id === user?.id && !message.is_deleted_for_everyone)
+      .map((message) => Date.parse(message.created_at) + MESSAGE_EDIT_WINDOW_MS + 1)
+      .filter((expiry) => Number.isFinite(expiry) && expiry > messageClock)
+      .sort((left, right) => left - right)[0];
+    if (nextExpiry === undefined) return;
+    const timer = setTimeout(() => setMessageClock(Date.now()), nextExpiry - messageClock);
+    return () => clearTimeout(timer);
+  }, [messages, messageClock, user?.id]);
+
+  useEffect(() => {
+    if (editingMessageId === null) return;
+    const editingMessage = messages.find((message) => message.id === editingMessageId);
+    if (editingMessage && isWithinEditWindow(editingMessage, messageClock)) return;
+    setEditingMessageId(null);
+    setEditDraft('');
+    setEditError(null);
+    if (editingMessage) setNotice('O prazo de 15 minutos para editar esta mensagem expirou.');
+  }, [editingMessageId, messageClock, messages]);
 
   const refreshConversations = useCallback(async () => {
     setConversationsLoading(true);
@@ -187,34 +246,68 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
       setAccessLostForId(null);
     }
     selectedIdRef.current = selectedId;
-    if (selectedId === null) {
-      setMessages([]);
+    if (selectedId === null || user === null) {
+      pollingControllerRef.current?.abort();
+      pollingControllerRef.current = null;
+      commitMessages(() => []);
       setMessagesError(null);
+      setPollError(null);
+      setSendError(null);
+      setDraft('');
+      setReportTarget(null);
+      setReportReason('');
+      setReportError(null);
+      setReportSending(false);
+      setEditingMessageId(null);
+      setEditDraft('');
+      setEditError(null);
+      setEditingSaving(false);
+      setDeleteTarget(null);
+      setDeleteError(null);
+      setDeleting(false);
+      setNotice(null);
       setHasMore(false);
+      setLoadingMore(false);
       setMessagesLoadedForId(null);
       oldestMessageRef.current = null;
       newestMessageRef.current = null;
+      updatesCursorRef.current = 0;
+      messageStateRevisionRef.current.clear();
       return;
     }
 
     let active = true;
-    setMessages([]);
+    commitMessages(() => []);
     setMessagesLoading(true);
     setMessagesError(null);
     setPollError(null);
     setSendError(null);
     setDraft('');
+    setEditingMessageId(null);
+    setEditDraft('');
+    setEditError(null);
+    setEditingSaving(false);
+    setDeleteTarget(null);
+    setDeleteError(null);
+    setDeleting(false);
     setHasMore(false);
     setMessagesLoadedForId(null);
     oldestMessageRef.current = null;
     newestMessageRef.current = null;
+    updatesCursorRef.current = 0;
+    messageStateRevisionRef.current.clear();
+    const controller = new AbortController();
 
-    // The explicit latest flag requests the newest chronological window while
-    // preserving the original offset behavior for existing API clients.
-    listMessages(selectedId, PAGE_SIZE, undefined, { latest: true })
-      .then((page) => {
+    // History and its event watermark must come from the same database snapshot.
+    loadLatestMessagesWithRevision(selectedId, PAGE_SIZE, controller.signal)
+      .then((sync) => {
         if (!active || selectedIdRef.current !== selectedId) return;
-        setMessages(mergeMessages([], page));
+        updatesCursorRef.current = sync.updates_revision;
+        for (const message of sync.items) {
+          messageStateRevisionRef.current.set(message.id, sync.updates_revision);
+        }
+        commitMessages(() => mergeMessages([], sync.items));
+        const page = sync.items;
         oldestMessageRef.current = page[0] ?? null;
         newestMessageRef.current = page.at(-1)
           ? { created_at: page.at(-1)!.created_at, id: page.at(-1)!.id }
@@ -225,7 +318,7 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
         setMessagesLoadedForId(selectedId);
       })
       .catch((error: unknown) => {
-        if (active && selectedIdRef.current === selectedId) {
+        if (active && selectedIdRef.current === selectedId && !controller.signal.aborted) {
           setMessagesError(getErrorMessage(error, 'Não foi possível carregar as mensagens.'));
         }
       })
@@ -233,8 +326,11 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
         if (active && selectedIdRef.current === selectedId) setMessagesLoading(false);
       });
 
-    return () => { active = false; };
-  }, [selectedId, messageRequestAttempt, selectedConversation?.created_at]);
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [selectedId, messageRequestAttempt, selectedConversation?.created_at, user?.id, commitMessages]);
 
   useEffect(() => {
     if (
@@ -242,6 +338,7 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
       || user === null
       || messagesLoadedForId !== selectedId
       || !pollingAvailable
+      || loadingMore
       || accessLostForId === selectedId
     ) return;
 
@@ -261,6 +358,7 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
       }
       controller = new AbortController();
       const requestController = controller;
+      pollingControllerRef.current = requestController;
       try {
         const incoming = await listMessages(
           selectedId,
@@ -272,9 +370,16 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
           },
         );
         if (!active || selectedIdRef.current !== selectedId) return;
-        setPollError(null);
         if (incoming.length > 0) {
-          setMessages((current) => mergeMessages(current, incoming));
+          const unseen = incoming.filter((message) => (
+            !messagesRef.current.some((current) => current.id === message.id)
+          ));
+          for (const message of unseen) {
+            if (!messageStateRevisionRef.current.has(message.id)) {
+              messageStateRevisionRef.current.set(message.id, updatesCursorRef.current);
+            }
+          }
+          if (unseen.length > 0) commitMessages((current) => mergeMessages(current, unseen));
           const latest = incoming.at(-1)!;
           if (!newestMessageRef.current || compareMessagePositions(latest, newestMessageRef.current) > 0) {
             newestMessageRef.current = { created_at: latest.created_at, id: latest.id };
@@ -285,13 +390,57 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
               : conversation
           ))));
         }
+
+        // Drain the event pages from one observed watermark. If more events
+        // arrive while draining, the next poll starts from the last confirmed
+        // cursor and retrieves them without skipping this batch.
+        let eventCursor = updatesCursorRef.current;
+        let targetWatermark: number | null = null;
+        while (active && selectedIdRef.current === selectedId) {
+          const page = await listMessageUpdates(
+            selectedId,
+            eventCursor,
+            PAGE_SIZE,
+            requestController.signal,
+          );
+          if (!active || selectedIdRef.current !== selectedId) return;
+          if (targetWatermark === null) targetWatermark = page.updates_revision;
+          if (page.updates_revision < eventCursor) {
+            throw new Error('A revisão de atualizações retornada é anterior ao cursor atual.');
+          }
+          if (page.has_more) {
+            if (
+              page.next_cursor <= eventCursor
+              || page.items.at(-1)?.event_revision !== page.next_cursor
+            ) {
+              throw new Error('A página de atualizações não avançou o cursor com segurança.');
+            }
+          } else if (page.next_cursor !== page.updates_revision) {
+            throw new Error('A página final não alcançou o watermark de atualizações.');
+          }
+
+          for (const event of page.items) {
+            if (event.message.conversation_id !== selectedId) continue;
+            const current = messagesRef.current.find((message) => message.id === event.message.id);
+            if (!current) continue;
+            const currentRevision = messageStateRevisionRef.current.get(event.message.id) ?? 0;
+            if (event.message_state_revision <= currentRevision) continue;
+            messageStateRevisionRef.current.set(event.message.id, event.message_state_revision);
+            commitMessages((currentMessages) => mergeMessages(currentMessages, [event.message]));
+          }
+
+          updatesCursorRef.current = page.next_cursor;
+          eventCursor = page.next_cursor;
+          if (!page.has_more || eventCursor >= targetWatermark) break;
+        }
+        setPollError(null);
       } catch (error) {
         if (active && selectedIdRef.current === selectedId && !requestController.signal.aborted) {
           if (error instanceof ApiError && error.status === 403) {
             active = false;
             accessLostRef.current = selectedId;
             setAccessLostForId(selectedId);
-            setMessages([]);
+            commitMessages(() => []);
             setMessagesError(null);
             setPollError(null);
             setMessagesLoading(false);
@@ -300,6 +449,13 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
             setHasMore(false);
             setLoadingMore(false);
             setSending(false);
+            setEditingMessageId(null);
+            setEditDraft('');
+            setEditError(null);
+            setEditingSaving(false);
+            setDeleteTarget(null);
+            setDeleteError(null);
+            setDeleting(false);
             setOpenMessageMenu(null);
             setReportTarget(null);
             setReportReason('');
@@ -309,12 +465,15 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
             setMessagesLoadedForId(null);
             oldestMessageRef.current = null;
             newestMessageRef.current = null;
+            updatesCursorRef.current = 0;
+            messageStateRevisionRef.current.clear();
             return;
           }
           setPollError(getErrorMessage(error, 'Atualização automática indisponível. Tentaremos novamente.'));
         }
       } finally {
         if (controller === requestController) controller = undefined;
+        if (pollingControllerRef.current === requestController) pollingControllerRef.current = null;
         scheduleNext();
       }
     };
@@ -324,12 +483,15 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
       active = false;
       if (timer !== undefined) clearTimeout(timer);
       controller?.abort();
+      if (pollingControllerRef.current === controller) pollingControllerRef.current = null;
     };
-  }, [selectedId, user?.id, messagesLoadedForId, pollingAvailable, accessLostForId]);
+  }, [selectedId, user?.id, messagesLoadedForId, pollingAvailable, accessLostForId, loadingMore, commitMessages]);
 
   async function handleLoadMore() {
+    const actorId = authenticatedUserIdRef.current;
     if (
       selectedId === null
+      || actorId === null
       || accessLostRef.current === selectedId
       || loadingMore
       || !hasMore
@@ -337,8 +499,10 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
     ) return;
     const conversationId = selectedId;
     const cursor = oldestMessageRef.current;
+    const cursorAtRequestStart = updatesCursorRef.current;
     setLoadingMore(true);
     setMessagesError(null);
+    pollingControllerRef.current?.abort();
     try {
       const page = await listMessages(conversationId, PAGE_SIZE, undefined, {
         cursor: {
@@ -347,8 +511,14 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
           id: cursor.id,
         },
       });
-      if (selectedIdRef.current !== conversationId || accessLostRef.current === conversationId) return;
-      setMessages((current) => mergeMessages(current, page));
+      if (
+        selectedIdRef.current !== conversationId
+        || authenticatedUserIdRef.current !== actorId
+        || accessLostRef.current === conversationId
+      ) return;
+      const unseen = page.filter((item) => !messagesRef.current.some((current) => current.id === item.id));
+      for (const item of unseen) messageStateRevisionRef.current.set(item.id, cursorAtRequestStart);
+      commitMessages((current) => mergeMessages(current, unseen));
       if (page.length > 0) oldestMessageRef.current = { created_at: page[0].created_at, id: page[0].id };
       setHasMore(page.length === PAGE_SIZE);
     } catch (error) {
@@ -362,7 +532,8 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
 
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (selectedId === null || accessLostRef.current === selectedId) return;
+    const actorId = authenticatedUserIdRef.current;
+    if (selectedId === null || actorId === null || accessLostRef.current === selectedId) return;
     const conversationId = selectedId;
     const content = draft.trim();
     if (!content || content.length > 5000 || sending) return;
@@ -372,8 +543,16 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
     setNotice(null);
     try {
       const created = await sendMessage(conversationId, content);
-      if (selectedIdRef.current !== conversationId || accessLostRef.current === conversationId) return;
-      setMessages((current) => mergeMessages(current, [created]));
+      if (
+        selectedIdRef.current !== conversationId
+        || authenticatedUserIdRef.current !== actorId
+        || accessLostRef.current === conversationId
+      ) return;
+      const alreadyRendered = messagesRef.current.some((message) => message.id === created.id);
+      if (!alreadyRendered) {
+        messageStateRevisionRef.current.set(created.id, updatesCursorRef.current);
+        commitMessages((current) => mergeMessages(current, [created]));
+      }
       // The POST confirms only this message, not every message after the
       // polling cursor. Leave the cursor for the next server read to advance.
       setDraft('');
@@ -387,6 +566,123 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
       }
     } finally {
       setSending(false);
+    }
+  }
+
+  function beginEditing(message: MessageResponse) {
+    if (message.sender_id !== authenticatedUserIdRef.current || !isWithinEditWindow(message, Date.now())) return;
+    setEditingMessageId(message.id);
+    setEditDraft(message.content);
+    setEditError(null);
+    setOpenMessageMenu(null);
+  }
+
+  function cancelEditing() {
+    if (editingSaving) return;
+    setEditingMessageId(null);
+    setEditDraft('');
+    setEditError(null);
+  }
+
+  async function handleEditSubmit(event: FormEvent<HTMLFormElement>, message: MessageResponse) {
+    event.preventDefault();
+    const actorId = authenticatedUserIdRef.current;
+    const conversationId = selectedIdRef.current;
+    const content = editDraft.trim();
+    if (
+      actorId === null
+      || conversationId === null
+      || message.sender_id !== actorId
+      || editingMessageId !== message.id
+      || !isWithinEditWindow(message, Date.now())
+      || message.is_deleted_for_everyone
+      || !content
+      || content.length > 5000
+      || editingSaving
+    ) return;
+
+    setEditingSaving(true);
+    setEditError(null);
+    try {
+      const result = await editMessage(conversationId, message.id, content);
+      if (
+        selectedIdRef.current !== conversationId
+        || authenticatedUserIdRef.current !== actorId
+        || accessLostRef.current === conversationId
+      ) return;
+
+      const currentRevision = messageStateRevisionRef.current.get(message.id) ?? 0;
+      if (result.message_state_revision > currentRevision) {
+        messageStateRevisionRef.current.set(message.id, result.message_state_revision);
+        commitMessages((current) => mergeMessages(current, [result.message]));
+      }
+      setEditingMessageId(null);
+      setEditDraft('');
+      setNotice('Mensagem editada.');
+    } catch (error) {
+      if (
+        selectedIdRef.current === conversationId
+        && authenticatedUserIdRef.current === actorId
+        && accessLostRef.current !== conversationId
+      ) {
+        setEditError(getErrorMessage(error, 'Não foi possível salvar a edição. Verifique sua conexão e tente novamente.'));
+      }
+    } finally {
+      if (selectedIdRef.current === conversationId && authenticatedUserIdRef.current === actorId) {
+        setEditingSaving(false);
+      }
+    }
+  }
+
+  async function handleDeleteConfirm() {
+    const target = deleteTarget;
+    const actorId = authenticatedUserIdRef.current;
+    const conversationId = selectedIdRef.current;
+    if (
+      !target
+      || actorId === null
+      || conversationId === null
+      || target.sender_id !== actorId
+      || target.is_deleted_for_everyone
+      || deleting
+      || accessLostRef.current === conversationId
+    ) return;
+
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const result = await deleteMessageRequest(conversationId, target.id);
+      if (
+        selectedIdRef.current !== conversationId
+        || authenticatedUserIdRef.current !== actorId
+        || accessLostRef.current === conversationId
+      ) return;
+
+      const currentRevision = messageStateRevisionRef.current.get(target.id) ?? 0;
+      if (result.message_state_revision > currentRevision) {
+        messageStateRevisionRef.current.set(target.id, result.message_state_revision);
+        commitMessages((current) => mergeMessages(current, [result.message]));
+      }
+      setDeleteTarget(null);
+      setDeleteError(null);
+      setNotice('Mensagem excluída para todos.');
+      setConversations((current) => sortConversationsByActivity(current.map((conversation) => (
+        conversation.id === conversationId
+          ? { ...conversation, updated_at: result.message.updated_at }
+          : conversation
+      ))));
+    } catch (error) {
+      if (
+        selectedIdRef.current === conversationId
+        && authenticatedUserIdRef.current === actorId
+        && accessLostRef.current !== conversationId
+      ) {
+        setDeleteError(getErrorMessage(error, 'Não foi possível excluir a mensagem. Verifique sua conexão e tente novamente.'));
+      }
+    } finally {
+      if (selectedIdRef.current === conversationId && authenticatedUserIdRef.current === actorId) {
+        setDeleting(false);
+      }
     }
   }
 
@@ -516,6 +812,11 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
                   <span>{selectedConversation.type === 'DIRECT' ? 'Conversa direta' : 'Conversa'} · atualização {formatDate(selectedConversation.updated_at)}</span>
                 </div>
                 {selectedConversation.type === 'DIRECT' && <span className="chat-thread__privacy"><ShieldCheck size={14} /> Privada</span>}
+                {selectedConversation.type === 'DIRECT' && messagesLoadedForId === selectedId && !messagesError && accessLostForId !== selectedId && (
+                  <BlockButton id={(selectedConversation.user_a_id === user.id ? selectedConversation.user_b_id : selectedConversation.user_a_id)!}
+                    key={selectedConversation.id} name={describeConversation(selectedConversation, user.id)}
+                    onBlocked={() => { if (selectedIdRef.current === selectedConversation.id) navigate('/pessoas'); }} />
+                )}
               </header>
 
               {notice && <div className="chat-notice" role="status"><Check size={15} />{notice}<button type="button" onClick={() => setNotice(null)} aria-label="Fechar aviso"><X size={14} /></button></div>}
@@ -548,6 +849,9 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
                   <div className="chat-message-list">
                     {messages.map((message) => {
                       const ownMessage = message.sender_id === user.id;
+                      const editing = editingMessageId === message.id;
+                      const canEdit = ownMessage && isWithinEditWindow(message, messageClock);
+                      const canDelete = ownMessage && !message.is_deleted_for_everyone;
                       return (
                         <article key={message.id} className={`chat-message-row${ownMessage ? ' is-own' : ''}`}>
                           {!ownMessage && <span className="chat-message-row__avatar" aria-hidden="true">{describeConversation(selectedConversation, user.id).slice(0, 1)}</span>}
@@ -555,11 +859,33 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
                             <div className="chat-message-row__meta">
                               <span>{ownMessage ? 'Você' : describeConversation(selectedConversation, user.id)}</span>
                               <time dateTime={message.created_at}>{formatDate(message.created_at)}</time>
+                              {message.edited_at && !message.is_deleted_for_everyone && <span className="chat-message-edited-label">editada</span>}
                             </div>
                             <div className="chat-message-row__content-wrap">
-                              {message.is_deleted_for_everyone && <span className="chat-message-deleted-label">Apagada para todos</span>}
-                              <p className={`chat-message-bubble${ownMessage ? ' is-own' : ''}`}>{message.content}</p>
-                              {!ownMessage && (
+                              {editing ? (
+                                <form className="chat-message-edit-form" onSubmit={(event) => void handleEditSubmit(event, message)}>
+                                  <textarea
+                                    aria-label={`Editar mensagem ${message.id}`}
+                                    value={editDraft}
+                                    maxLength={5000}
+                                    rows={3}
+                                    onChange={(event) => setEditDraft(event.target.value)}
+                                    disabled={editingSaving}
+                                    autoFocus
+                                  />
+                                  {editError && <p className="chat-message-edit-error" role="alert">{editError}</p>}
+                                  <div className="chat-message-edit-form__actions">
+                                    <button type="button" onClick={cancelEditing} disabled={editingSaving} aria-label="Cancelar edição"><X size={13} /> Cancelar</button>
+                                    <button type="submit" disabled={editingSaving || !editDraft.trim() || editDraft.trim().length > 5000}>
+                                      {editingSaving ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />}
+                                      {editingSaving ? 'Salvando…' : 'Salvar edição'}
+                                    </button>
+                                  </div>
+                                </form>
+                              ) : (
+                                <p className={`chat-message-bubble${ownMessage ? ' is-own' : ''}`}>{message.content}</p>
+                              )}
+                              {(!ownMessage || canEdit || canDelete) && !editing && (
                                 <div className="chat-message-menu-wrap">
                                   <button
                                     className="chat-message-menu-trigger"
@@ -570,9 +896,19 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
                                   ><MoreHorizontal size={17} /></button>
                                   {openMessageMenu === message.id && (
                                     <div className="chat-message-menu" role="menu">
-                                      <button type="button" role="menuitem" onClick={() => { setReportTarget(message); setReportReason(''); setReportError(null); setOpenMessageMenu(null); }}>
+                                      {ownMessage && canEdit && <button type="button" role="menuitem" onClick={() => beginEditing(message)}>
+                                        <Pencil size={14} /> Editar mensagem
+                                      </button>}
+                                      {canDelete && <button type="button" role="menuitem" onClick={() => {
+                                        setDeleteTarget(message);
+                                        setDeleteError(null);
+                                        setOpenMessageMenu(null);
+                                      }}>
+                                        <Trash2 size={14} /> Excluir mensagem
+                                      </button>}
+                                      {!ownMessage && <button type="button" role="menuitem" onClick={() => { setReportTarget(message); setReportReason(''); setReportError(null); setOpenMessageMenu(null); }}>
                                         <ShieldCheck size={14} /> Denunciar mensagem
-                                      </button>
+                                      </button>}
                                     </div>
                                   )}
                                 </div>
@@ -645,6 +981,29 @@ export function ConversationWorkspace({ createDialogOpen, onCreateDialogOpenChan
               {reportError && <p className="chat-modal__error" role="alert">{reportError}</p>}
               <footer><button className="chat-modal__cancel" type="button" onClick={() => setReportTarget(null)}>Cancelar</button><button className="chat-modal__submit" type="submit" disabled={reportSending || !reportReason.trim()}>{reportSending ? 'Enviando…' : 'Enviar denúncia'}</button></footer>
             </form>
+          </section>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="chat-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeleteTarget(null); }}>
+          <section className="chat-modal" role="dialog" aria-modal="true" aria-labelledby="delete-message-title">
+            <header className="chat-modal__header">
+              <div>
+                <span className="chat-modal__icon chat-modal__icon--report"><Trash2 size={17} /></span>
+                <div><h2 id="delete-message-title">Excluir mensagem para todos?</h2><p>O conteúdo será substituído para todos os participantes.</p></div>
+              </div>
+              <button type="button" onClick={() => { if (!deleting) setDeleteTarget(null); }} aria-label="Fechar" disabled={deleting}><X size={17} /></button>
+            </header>
+            <p className="chat-delete-confirmation-copy">A conversa exibirá “Esta mensagem foi excluída” no lugar da mensagem. Essa ação não pode ser desfeita.</p>
+            {deleteError && <p className="chat-modal__error" role="alert">{deleteError}</p>}
+            <footer className="chat-delete-confirmation-actions">
+              <button className="chat-modal__cancel" type="button" onClick={() => setDeleteTarget(null)} disabled={deleting}>Cancelar</button>
+              <button className="chat-modal__submit chat-modal__submit--danger" type="button" onClick={() => void handleDeleteConfirm()} disabled={deleting}>
+                {deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
+                {deleting ? 'Excluindo…' : 'Excluir para todos'}
+              </button>
+            </footer>
           </section>
         </div>
       )}

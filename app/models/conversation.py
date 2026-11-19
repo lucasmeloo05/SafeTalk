@@ -6,6 +6,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    CheckConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -47,6 +48,7 @@ class Conversation(Base):
             "user_b_id",
             name="uq_conversations_direct_pair",
         ),
+        CheckConstraint("messages_revision >= 0", name="ck_conversations_messages_revision_nonnegative"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -96,3 +98,5 @@ class Conversation(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    messages_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)

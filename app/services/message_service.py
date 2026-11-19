@@ -11,9 +11,80 @@ from app.models import (
     Conversation,
     ConversationParticipant,
     Message,
+    MessageEditHistory,
     MessageUserDeletion,
+    MessageUpdateEvent,
     User,
 )
+
+
+DELETED_MESSAGE_PLACEHOLDER = "Esta mensagem foi excluída"
+
+
+def lock_conversation_for_message_update(db: Session, conversation_id: int) -> Conversation:
+    conversation = db.scalar(
+        select(Conversation).where(Conversation.id == conversation_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversa não encontrada.")
+    return conversation
+
+
+def lock_direct_conversation_users(db: Session, conversation_id: int) -> Conversation:
+    """Serialize direct-message access with blocks using a stable lock order.
+
+    Social block mutations take ``User FOR UPDATE`` in ascending ID order.
+    Message operations take compatible ``User FOR KEY SHARE`` locks in that
+    same order before any conversation/message lock. A committed block is
+    therefore observed by later message operations, while an already-running
+    operation completes before the block commits. Group conversations have no
+    pairwise block rule and do not acquire user locks.
+    """
+    conversation = db.scalar(
+        select(Conversation)
+        .where(Conversation.id == conversation_id)
+        .execution_options(populate_existing=True)
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversa não encontrada.")
+
+    if conversation.type == "DIRECT":
+        if conversation.user_a_id is None or conversation.user_b_id is None:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada.")
+        user_ids = sorted({conversation.user_a_id, conversation.user_b_id})
+        locked_user_ids = db.scalars(
+            select(User.id)
+            .where(User.id.in_(user_ids))
+            .order_by(User.id)
+            .with_for_update(read=True, key_share=True)
+        ).all()
+        if len(locked_user_ids) != len(user_ids):
+            raise HTTPException(status_code=404, detail="Conversa não encontrada.")
+
+    return conversation
+
+
+def record_message_update_event(
+    db: Session, conversation: Conversation, message: Message, event_type: str
+) -> int:
+    """Increment and persist the per-conversation event revision transactionally.
+
+    Call only while holding the conversation row lock and in the same
+    transaction as the associated message mutation.
+    """
+    if event_type not in {"UPDATED", "DELETED"}:
+        raise ValueError("Tipo de evento de mensagem inválido.")
+    conversation.messages_revision += 1
+    event = MessageUpdateEvent(
+        conversation_id=conversation.id,
+        revision=conversation.messages_revision,
+        message_id=message.id,
+        event_type=event_type,
+    )
+    db.add(event)
+    db.flush()
+    return event.revision
 
 
 def get_active_participant(
@@ -80,45 +151,11 @@ def send_message(
     conversation_id: int,
     content: str,
 ) -> dict[str, Any]:
-    conversation = db.get(Conversation, conversation_id)
-
-    if conversation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Conversa não encontrada.",
-        )
-
-    get_active_participant(
-        db,
-        conversation_id,
-        current_user.id,
-    )
-
-    check_direct_conversation_block(
-        db,
-        conversation,
-        current_user.id,
-    )
-
     try:
-        # Every message writer must lock this conversation before assigning its
-        # timestamp. This serializes sends only within the same conversation,
-        # so a transaction that began earlier cannot commit behind an already
-        # observed incremental cursor.
-        conversation = db.scalar(
-            select(Conversation)
-            .where(Conversation.id == conversation_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        if conversation is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conversa não encontrada.",
-            )
-
-        # Recheck authorization after taking the serialization lock because a
-        # participant or block may have changed while this send was waiting.
+        # Lock direct-conversation users before conversation/message rows,
+        # matching the social block service's ascending user-ID order.
+        conversation = lock_direct_conversation_users(db, conversation_id)
+        conversation = lock_conversation_for_message_update(db, conversation_id)
         get_active_participant(db, conversation_id, current_user.id)
         check_direct_conversation_block(db, conversation, current_user.id)
 
@@ -155,21 +192,213 @@ def send_message(
         conversation.updated_at = message.created_at
 
         db.commit()
-        db.refresh(message)
 
     except Exception:
         db.rollback()
         raise
 
+    # The conversation lock is released by commit. A concurrent DELETE may
+    # finish before this read; serialize the row's refreshed persisted state so
+    # this POST cannot return deleted content as an active message.
+    db.refresh(message)
+    return _message_response_data(message)
+
+
+def edit_message(
+    db: Session,
+    current_user: User,
+    conversation_id: int,
+    message_id: int,
+    content: str,
+) -> dict[str, Any]:
+    """Edit one authored message and persist its audit/event atomically."""
+    normalized_content = content.strip()
+    if not normalized_content or len(normalized_content) > 5000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A mensagem deve conter de 1 a 5.000 caracteres após a normalização.",
+        )
+
+    try:
+        # Stable lock order: direct-conversation users, conversation, message.
+        # The user locks coordinate authorization with social block mutations;
+        # the conversation lock serializes revisions before the message lock.
+        lock_direct_conversation_users(db, conversation_id)
+        conversation = lock_conversation_for_message_update(db, conversation_id)
+        get_active_participant(db, conversation_id, current_user.id)
+        check_direct_conversation_block(db, conversation, current_user.id)
+
+        message = db.scalar(
+            select(Message)
+            .where(
+                Message.id == message_id,
+                Message.conversation_id == conversation_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if message is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Mensagem não encontrada nesta conversa.",
+            )
+        if message.sender_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Somente o autor pode editar esta mensagem.",
+            )
+        if message.deleted_for_everyone_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Mensagens apagadas para todos não podem ser editadas.",
+            )
+
+        database_now = db.scalar(select(func.clock_timestamp()))
+        if database_now is None:
+            raise RuntimeError("Não foi possível obter o horário do banco.")
+        if database_now > message.created_at + timedelta(minutes=15):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="O prazo de 15 minutos para editar esta mensagem expirou.",
+            )
+
+        if normalized_content == message.content:
+            current_message_revision = db.scalar(
+                select(func.max(MessageUpdateEvent.revision)).where(
+                    MessageUpdateEvent.conversation_id == conversation_id,
+                    MessageUpdateEvent.message_id == message_id,
+                )
+            ) or 0
+            result = {
+                "message": _message_response_data(message),
+                "message_state_revision": current_message_revision,
+            }
+            db.commit()
+            return result
+
+        previous_content = message.content
+        edited_at = database_now
+        expected_revision = conversation.messages_revision + 1
+
+        # Add the immutable version before mutating the current row. Its
+        # deferred FK is checked at commit after the update event is inserted.
+        db.add(
+            MessageEditHistory(
+                message_id=message.id,
+                conversation_id=conversation.id,
+                previous_content=previous_content,
+                new_content=normalized_content,
+                edited_by_id=current_user.id,
+                edited_at=edited_at,
+                message_state_revision=expected_revision,
+            )
+        )
+        message.content = normalized_content
+        message.updated_at = edited_at
+        message.edited_at = edited_at
+        conversation.updated_at = edited_at
+
+        revision = record_message_update_event(db, conversation, message, "UPDATED")
+        if revision != expected_revision:
+            raise RuntimeError("A revisão da edição divergiu do evento registrado.")
+
+        # Build the response while the transaction is still open. Once commit
+        # succeeds, no refresh or other fallible database operation should turn
+        # a persisted edit into an apparent request failure.
+        result = {
+            "message": _message_response_data(message),
+            "message_state_revision": revision,
+        }
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+def delete_message_for_everyone(
+    db: Session,
+    current_user: User,
+    conversation_id: int,
+    message_id: int,
+) -> dict[str, Any]:
+    """Soft-delete an authored message globally and publish one sync event."""
+    try:
+        # Keep the same user -> conversation -> message lock order as edits.
+        # The conversation lock serializes delete/delete and edit/delete and
+        # protects the per-conversation revision counter.
+        lock_direct_conversation_users(db, conversation_id)
+        conversation = lock_conversation_for_message_update(db, conversation_id)
+        get_active_participant(db, conversation_id, current_user.id)
+        check_direct_conversation_block(db, conversation, current_user.id)
+
+        message = db.scalar(
+            select(Message)
+            .where(
+                Message.id == message_id,
+                Message.conversation_id == conversation_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if message is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Mensagem não encontrada nesta conversa.",
+            )
+        if message.sender_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Somente o autor pode excluir esta mensagem.",
+            )
+        if message.deleted_for_everyone_at is not None:
+            revision = db.scalar(
+                select(func.max(MessageUpdateEvent.revision)).where(
+                    MessageUpdateEvent.conversation_id == conversation_id,
+                    MessageUpdateEvent.message_id == message_id,
+                )
+            ) or 0
+            result = {
+                "message": _message_response_data(message),
+                "message_state_revision": revision,
+            }
+            db.commit()
+            return result
+
+        deleted_at = db.scalar(select(func.clock_timestamp()))
+        if deleted_at is None:
+            raise RuntimeError("Não foi possível obter o horário do banco.")
+        message.deleted_for_everyone_at = deleted_at
+        message.deleted_for_everyone_by_id = current_user.id
+        message.updated_at = deleted_at
+        conversation.updated_at = deleted_at
+
+        revision = record_message_update_event(db, conversation, message, "DELETED")
+        result = {
+            "message": _message_response_data(message),
+            "message_state_revision": revision,
+        }
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _message_response_data(message: Message) -> dict[str, Any]:
     return {
         "id": message.id,
         "conversation_id": message.conversation_id,
         "sender_id": message.sender_id,
-        "content": message.content,
+        "content": (
+            DELETED_MESSAGE_PLACEHOLDER
+            if message.deleted_for_everyone_at is not None
+            else message.content
+        ),
         "created_at": message.created_at,
         "updated_at": message.updated_at,
         "edited_at": message.edited_at,
-        "is_deleted_for_everyone": False,
+        "is_deleted_for_everyone": message.deleted_for_everyone_at is not None,
     }
 
 
@@ -186,13 +415,7 @@ def list_messages(
     before_created_at: datetime | None = None,
     before_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    conversation = db.get(Conversation, conversation_id)
-
-    if conversation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Conversa não encontrada.",
-        )
+    conversation = lock_direct_conversation_users(db, conversation_id)
 
     get_active_participant(
         db,
@@ -296,7 +519,7 @@ def list_messages(
             "conversation_id": message.conversation_id,
             "sender_id": message.sender_id,
             "content": (
-                "[Mensagem excluída]"
+                DELETED_MESSAGE_PLACEHOLDER
                 if message.deleted_for_everyone_at is not None
                 else message.content
             ),
@@ -309,3 +532,137 @@ def list_messages(
         }
         for message in messages
     ]
+
+
+def list_message_update_events(
+    db: Session, current_user: User, conversation_id: int, after_revision: int, limit: int = 50
+) -> dict[str, Any]:
+    conversation = lock_direct_conversation_users(db, conversation_id)
+    get_active_participant(db, conversation_id, current_user.id)
+    check_direct_conversation_block(db, conversation, current_user.id)
+
+    event = MessageUpdateEvent
+    state_revisions = (
+        select(
+            MessageUpdateEvent.conversation_id.label("conversation_id"),
+            MessageUpdateEvent.message_id.label("message_id"),
+            func.max(MessageUpdateEvent.revision).label("message_state_revision"),
+        )
+        .where(MessageUpdateEvent.conversation_id == conversation_id)
+        .group_by(MessageUpdateEvent.conversation_id, MessageUpdateEvent.message_id)
+        .subquery()
+    )
+    statement = (
+        select(
+            Conversation.messages_revision,
+            event.revision,
+            event.event_type,
+            Message,
+            state_revisions.c.message_state_revision,
+        )
+        .select_from(Conversation)
+        .outerjoin(
+            event,
+            and_(
+                event.conversation_id == Conversation.id,
+                event.revision > after_revision,
+            ),
+        )
+        .outerjoin(Message, and_(
+            Message.id == event.message_id,
+            Message.conversation_id == event.conversation_id,
+        ))
+        .outerjoin(state_revisions, and_(
+            state_revisions.c.conversation_id == event.conversation_id,
+            state_revisions.c.message_id == event.message_id,
+        ))
+        .where(Conversation.id == conversation_id)
+        .order_by(event.revision.asc())
+        .limit(limit + 1)
+    )
+    rows = db.execute(statement).all()
+    watermark = rows[0][0]
+    if after_revision > watermark:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="O cursor de atualizações está acima da revisão da conversa.",
+        )
+    has_more = len(rows) > limit
+    items = []
+    for _, revision, event_type, message, state_revision in rows[:limit]:
+        if revision is None or message is None:
+            continue
+        items.append({
+            "event_revision": revision,
+            "message_state_revision": state_revision,
+            "event_type": event_type,
+            "message": {
+                "id": message.id,
+                "conversation_id": message.conversation_id,
+                "sender_id": message.sender_id,
+                "content": DELETED_MESSAGE_PLACEHOLDER if message.deleted_for_everyone_at else message.content,
+                "created_at": message.created_at,
+                "updated_at": message.updated_at,
+                "edited_at": message.edited_at,
+                "is_deleted_for_everyone": message.deleted_for_everyone_at is not None,
+            },
+        })
+    next_cursor = items[-1]["event_revision"] if has_more else watermark
+    return {
+        "items": items,
+        "updates_revision": watermark,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+    }
+
+
+def load_latest_messages_with_revision(
+    db: Session, current_user: User, conversation_id: int, limit: int = 50
+) -> dict[str, Any]:
+    conversation = lock_direct_conversation_users(db, conversation_id)
+    get_active_participant(db, conversation_id, current_user.id)
+    check_direct_conversation_block(db, conversation, current_user.id)
+    deleted_by_user = select(MessageUserDeletion.id).where(
+        MessageUserDeletion.message_id == Message.id,
+        MessageUserDeletion.user_id == current_user.id,
+    ).exists()
+    latest = (
+        select(Message)
+        .where(Message.conversation_id == conversation_id, ~deleted_by_user)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(limit)
+        .subquery()
+    )
+    statement = (
+        select(
+            Conversation.messages_revision,
+            latest.c.id,
+            latest.c.conversation_id,
+            latest.c.sender_id,
+            latest.c.content,
+            latest.c.created_at,
+            latest.c.updated_at,
+            latest.c.edited_at,
+            latest.c.deleted_for_everyone_at,
+        )
+        .select_from(Conversation)
+        .outerjoin(latest, latest.c.conversation_id == Conversation.id)
+        .where(Conversation.id == conversation_id)
+        .order_by(latest.c.created_at.asc(), latest.c.id.asc())
+    )
+    rows = db.execute(statement).all()
+    items = []
+    for row in rows:
+        if row.id is None:
+            continue
+        items.append({
+            "id": row.id,
+            "conversation_id": row.conversation_id,
+            "sender_id": row.sender_id,
+            "content": DELETED_MESSAGE_PLACEHOLDER if row.deleted_for_everyone_at else row.content,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+            "edited_at": row.edited_at,
+            "is_deleted_for_everyone": row.deleted_for_everyone_at is not None,
+        })
+    return {"items": items, "updates_revision": rows[0][0]}

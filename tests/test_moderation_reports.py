@@ -310,7 +310,7 @@ def test_deleted_for_everyone_message_remains_reportable_with_original_official_
         headers=auth_headers(reporter),
     )
     assert deleted_message.status_code == 200, deleted_message.text
-    assert deleted_message.json()[0]["content"] == "[Mensagem excluída]"
+    assert deleted_message.json()[0]["content"] == "Esta mensagem foi excluída"
     assert deleted_message.json()[0]["is_deleted_for_everyone"] is True
 
     report_response = client.post(
@@ -378,7 +378,7 @@ def test_deleting_message_after_report_preserves_original_official_evidence(
     )
     assert deleted_message.status_code == 200, deleted_message.text
     assert deleted_message.json()[0]["is_deleted_for_everyone"] is True
-    assert deleted_message.json()[0]["content"] == "[Mensagem excluída]"
+    assert deleted_message.json()[0]["content"] == "Esta mensagem foi excluída"
 
     evidence = db_session.scalar(
         select(ModerationReportEvidence).where(

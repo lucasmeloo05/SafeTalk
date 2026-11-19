@@ -26,6 +26,8 @@ from app.models.conversation_invitation import ConversationInvitation
 
 from app.models.message import Message
 from app.models.message_user_deletion import MessageUserDeletion
+from app.models.message_update_event import MessageUpdateEvent
+from app.models.message_edit_history import MessageEditHistory
 
 
 __all__ = [
@@ -52,4 +54,6 @@ __all__ = [
     "ConversationInvitation",
     "Message",
     "MessageUserDeletion",
+    "MessageUpdateEvent",
+    "MessageEditHistory",
 ]

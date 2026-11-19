@@ -1,15 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { apiMock } = vi.hoisted(() => ({
-  apiMock: { get: vi.fn(), post: vi.fn() },
+  apiMock: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
 
 vi.mock('@/lib/api', () => ({ api: apiMock }));
 
 import {
   createDirectConversation,
+  deleteMessage,
+  editMessage,
   listConversations,
+  listMessageUpdates,
   listMessages,
+  loadLatestMessagesWithRevision,
   reportMessage,
   sendMessage,
 } from '@/services/conversation-api';
@@ -54,6 +58,30 @@ describe('serviços de conversas e mensagens', () => {
     });
   });
 
+  it('carrega a janela inicial e a revisão no mesmo endpoint autenticado', async () => {
+    const page = { items: [{ id: 22, content: 'Atual' }], updates_revision: 8 };
+    const controller = new AbortController();
+    apiMock.get.mockResolvedValue({ data: page });
+
+    await expect(loadLatestMessagesWithRevision(12, 50, controller.signal)).resolves.toEqual(page);
+    expect(apiMock.get).toHaveBeenCalledWith('/conversations/12/messages/sync', {
+      params: { limit: 50 },
+      signal: controller.signal,
+    });
+  });
+
+  it('consulta páginas de eventos usando o cursor aprovado e signal de cancelamento', async () => {
+    const page = { items: [], updates_revision: 12, next_cursor: 10, has_more: true };
+    const controller = new AbortController();
+    apiMock.get.mockResolvedValue({ data: page });
+
+    await expect(listMessageUpdates(12, 9, 1, controller.signal)).resolves.toEqual(page);
+    expect(apiMock.get).toHaveBeenCalledWith('/conversations/12/message-updates', {
+      params: { after_revision: 9, limit: 1 },
+      signal: controller.signal,
+    });
+  });
+
   it('envia cursor composto e sinal de cancelamento para consulta incremental', async () => {
     const messages = [{ id: 22, content: 'Nova' }];
     const controller = new AbortController();
@@ -86,6 +114,31 @@ describe('serviços de conversas e mensagens', () => {
     expect(apiMock.post).toHaveBeenCalledWith('/conversations/12/messages', {
       content: 'Olá',
     });
+  });
+
+  it('edita mensagem pelo endpoint existente enviando somente content', async () => {
+    const result = {
+      message: { id: 9, conversation_id: 12, content: 'Atualizada', edited_at: '2026-11-18T12:00:00Z' },
+      message_state_revision: 4,
+    };
+    apiMock.patch.mockResolvedValue({ data: result });
+
+    await expect(editMessage(12, 9, 'Atualizada')).resolves.toEqual(result);
+    expect(apiMock.patch).toHaveBeenCalledWith(
+      '/conversations/12/messages/9',
+      { content: 'Atualizada' },
+    );
+  });
+
+  it('solicita exclusão global no endpoint da conversa e recebe a revisão aplicada', async () => {
+    const result = {
+      message: { id: 9, conversation_id: 12, content: 'Esta mensagem foi excluída', is_deleted_for_everyone: true },
+      message_state_revision: 7,
+    };
+    apiMock.delete.mockResolvedValue({ data: result });
+
+    await expect(deleteMessage(12, 9)).resolves.toEqual(result);
+    expect(apiMock.delete).toHaveBeenCalledWith('/conversations/12/messages/9');
   });
 
   it('denuncia a mensagem pelo ID real e motivo informado', async () => {

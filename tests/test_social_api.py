@@ -280,8 +280,8 @@ def test_relationship_list_supports_bounded_pagination(client, db_session, creat
 
 def test_search_excludes_users_blocked_in_either_direction(client, db_session, create_user, auth_headers):
     actor = create_user(username="search_actor")
-    blocked_by_actor = create_user(username="blocked_by_actor")
-    blocks_actor = create_user(username="blocks_actor")
+    blocked_by_actor = create_user(username="person_blocked_by_actor")
+    blocks_actor = create_user(username="person_blocks_actor")
     visible = create_user(username="visible_person")
     db_session.add_all([
         Block(blocker_id=actor["id"], blocked_id=blocked_by_actor["id"]),
@@ -389,6 +389,94 @@ def test_request_can_be_cancelled_rejected_and_resent(client, create_user, auth_
     assert resent.status_code == 201 and resent.json()["status"] == "PENDING"
     cancelled = client.delete(f"/social/requests/{resent.json()['friendship_id']}", headers=auth_headers(sender))
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "CANCELLED"
+
+
+@pytest.mark.parametrize("previous", [None, "friends", "sent", "received"])
+def test_block_lifecycle(client, db_session, create_user, auth_headers, previous):
+    actor, target = create_user(), create_user()
+    a, b = auth_headers(actor), auth_headers(target)
+    target_path = f"/social/blocks/{target['id']}"
+    actor_path = f"/social/blocks/{actor['id']}"
+    if previous:
+        sender, recipient, headers = (target, actor, b) if previous == "received" else (actor, target, a)
+        req = client.post("/social/requests", json={"recipient_id": recipient["id"]}, headers=headers)
+        assert req.status_code == 201
+        if previous == "friends":
+            assert client.post(f"/social/requests/{req.json()['friendship_id']}/accept", headers=b).is_success
+    assert client.put(actor_path, headers=a).status_code == 400
+    assert client.put(target_path).status_code == 401
+    assert client.put(target_path, headers=a).status_code == 204
+    if previous:
+        row = db_session.get(Friendship, req.json()["friendship_id"])
+        db_session.refresh(row)
+        assert row.status == ("REMOVED" if previous == "friends" else "CANCELLED")
+    assert client.put(target_path, headers=a).status_code == 409
+    assert client.get("/social/blocks", headers=a).json() == [{"id": target["id"], "username": target["username"]}]
+    assert client.get("/social/blocks", headers=b).json() == []
+    assert client.delete(actor_path, headers=b).status_code == 404
+    assert client.put(actor_path, headers=b).status_code == 204
+    assert client.delete(target_path, headers=a).status_code == 204
+    assert client.post("/social/requests", json={"recipient_id": target["id"]}, headers=a).status_code == 404
+    assert client.delete(actor_path, headers=b).status_code == 204
+    for path in ("friends", "requests/sent", "requests/received"):
+        assert client.get(f"/social/{path}", headers=a).json()["total"] == 0
+    assert client.post("/social/requests", json={"recipient_id": target["id"]}, headers=a).status_code == 201
+
+
+def test_block_prevents_chat_without_disclosing_block_direction(client, create_user, auth_headers):
+    users = [create_user(), create_user()]
+    left, right = map(auth_headers, users)
+    client.patch("/users/me/privacy", json={"allow_messages_from_strangers": True}, headers=right)
+    direct = "/conversations/direct"
+    payload = {"recipient_id": users[1]["id"]}
+    conversation = client.post(direct, json=payload, headers=left)
+    assert conversation.status_code == 200
+    messages = f"/conversations/{conversation.json()['id']}/messages"
+    assert client.put(f"/social/blocks/{users[1]['id']}", headers=left).status_code == 204
+    for actor_headers, recipient in ((left, users[1]), (right, users[0])):
+        assert client.post(direct, json={"recipient_id": recipient["id"]}, headers=actor_headers).status_code == 403
+        assert client.get(messages, headers=actor_headers).status_code == 403
+        assert client.post(messages, json={"content": "Teste"}, headers=actor_headers).status_code == 403
+
+
+def test_block_serializes_with_request():
+    from app.services.social_service import block_user
+
+    actor, target, _ = _persist_concurrent_pair()
+    name = f"block_wait_{uuid.uuid4().hex}"
+    started = threading.Event()
+
+    def request():
+        with Session(test_engine) as session:
+            session.connection().exec_driver_sql(f"SET application_name = '{name}'")
+            started.set()
+            with pytest.raises(HTTPException) as denied:
+                create_friend_request(session, target, actor)
+            assert denied.value.status_code == 404
+
+    ready = threading.Event()
+    release = threading.Event()
+
+    def block():
+        with Session(test_engine) as session:
+            @event.listens_for(session, "before_commit", once=True)
+            def hold_commit(_session):
+                ready.set()
+                assert release.wait(15)
+
+            block_user(session, actor, target)
+
+    with ThreadPoolExecutor(2) as pool:
+        blocking = pool.submit(block)
+        try:
+            assert ready.wait(5)
+            future = pool.submit(request)
+            assert started.wait(5)
+            _wait_for_postgres_lock_wait(name)
+        finally:
+            release.set()
+        blocking.result(timeout=10)
+        future.result(timeout=10)
 
 
 def test_reciprocal_first_direct_conversation_serializes():

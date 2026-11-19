@@ -7,6 +7,7 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.models import User
 from app.schemas import (
+    BlockedUser,
     FriendRequestCreate,
     FriendshipActionResponse,
     SocialUserPage,
@@ -15,6 +16,25 @@ from app.services import social_service
 
 
 router = APIRouter(prefix="/social", tags=["Social"])
+
+
+@router.get("/blocks", response_model=list[BlockedUser])
+def list_blocks(current_user: Annotated[User, Depends(get_current_user)],
+                db: Annotated[Session, Depends(get_db)],
+                limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
+    return social_service.list_blocks(db, current_user.id, limit, offset)
+
+
+@router.put("/blocks/{user_id}", status_code=204)
+def block_user(user_id: int, current_user: Annotated[User, Depends(get_current_user)],
+               db: Annotated[Session, Depends(get_db)]):
+    social_service.block_user(db, current_user.id, user_id)
+
+
+@router.delete("/blocks/{user_id}", status_code=204)
+def unblock_user(user_id: int, current_user: Annotated[User, Depends(get_current_user)],
+                 db: Annotated[Session, Depends(get_db)]):
+    social_service.unblock_user(db, current_user.id, user_id)
 
 
 @router.get("/friends", response_model=SocialUserPage)

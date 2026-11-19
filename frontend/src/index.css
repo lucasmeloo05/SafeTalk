@@ -386,6 +386,7 @@ button.dashboard-nav__link { font-family: inherit; cursor: default; }
 .chat-message-row__meta { display: flex; align-items: center; gap: 9px; margin: 0 3px 5px; color: #94a1b3; font-size: 8px; }
 .chat-message-row.is-own .chat-message-row__meta { justify-content: flex-end; }
 .chat-message-row__meta time { color: #66758b; font-size: 7px; }
+.chat-message-edited-label { color: #7f90ad; font-size: 7px; font-style: italic; }
 .chat-message-row__content-wrap { display: flex; align-items: center; gap: 3px; }
 .chat-message-row.is-own .chat-message-row__content-wrap { justify-content: flex-end; }
 .chat-message-deleted-label { flex: 0 0 auto; padding: 3px 6px; border: 1px solid #46516a; border-radius: 6px; color: #a7b1c3; background: #202a3b; font-size: 7px; }
@@ -398,6 +399,16 @@ button.dashboard-nav__link { font-family: inherit; cursor: default; }
 .chat-message-menu button { display: flex; width: 100%; align-items: center; gap: 8px; padding: 8px; border: 0; border-radius: 5px; color: #d2dbea; background: transparent; text-align: left; cursor: pointer; font-size: 9px; }
 .chat-message-menu button:hover { color: #e8effc; background: #24334a; }
 .chat-message-menu button svg { color: #a6b8ef; }
+.chat-message-edit-form { display: flex; width: min(100%, 520px); flex-direction: column; gap: 6px; }
+.chat-message-edit-form textarea { width: 100%; min-height: 54px; max-height: 150px; resize: vertical; padding: 8px 10px; border: 1px solid #4864a0; border-radius: 8px; outline: none; color: #e0e7f3; background: #0d1521; font: inherit; font-size: 10px; line-height: 1.55; }
+.chat-message-edit-form textarea:focus { border-color: #718bd0; }
+.chat-message-edit-form textarea:disabled { opacity: .65; cursor: wait; }
+.chat-message-edit-form__actions { display: flex; justify-content: flex-end; gap: 6px; }
+.chat-message-edit-form__actions button { display: inline-flex; min-height: 28px; align-items: center; justify-content: center; gap: 5px; padding: 0 8px; border: 1px solid #344258; border-radius: 6px; color: #aebbd0; background: #172230; cursor: pointer; font-size: 8px; }
+.chat-message-edit-form__actions button:last-child { border-color: #4864a0; color: #e0e8fb; background: #2b416d; }
+.chat-message-edit-form__actions button:hover:not(:disabled) { border-color: #657eaf; }
+.chat-message-edit-form__actions button:disabled { opacity: .55; cursor: wait; }
+.chat-message-edit-error { margin: 0; color: #e6a6a8; font-size: 8px; }
 .chat-message-state { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: #8896aa; text-align: center; font-size: 10px; }
 .chat-message-state > svg { color: #879bbf; }
 .chat-message-state p { max-width: 380px; margin: 0; line-height: 1.7; }
@@ -439,6 +450,12 @@ button.dashboard-nav__link { font-family: inherit; cursor: default; }
 .chat-modal form > input, .chat-modal form > textarea { width: 100%; padding: 9px 10px; border: 1px solid #334056; border-radius: 7px; outline: none; color: #e0e7f3; background: #0d1521; font: inherit; font-size: 10px; }
 .chat-modal form > input:focus, .chat-modal form > textarea:focus { border-color: #5b76a8; }
 .chat-modal form > textarea { resize: vertical; line-height: 1.6; }
+.chat-delete-confirmation-copy { margin: 0; padding: 2px 14px 8px; color: #aab6c8; font-size: 9px; line-height: 1.65; }
+.chat-delete-confirmation-actions { display: flex; justify-content: flex-end; gap: 7px; padding: 0 14px 13px; }
+.chat-delete-confirmation-actions > button { display: inline-flex; min-height: 31px; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; border: 1px solid #354258; border-radius: 7px; color: #aebbd0; background: #172230; cursor: pointer; font: inherit; font-size: 9px; }
+.chat-delete-confirmation-actions > .chat-modal__submit--danger { border-color: #8a4a53; color: #ffe8e9; background: #743c45; }
+.chat-delete-confirmation-actions > button:hover:not(:disabled) { filter: brightness(1.1); }
+.chat-delete-confirmation-actions > button:disabled { opacity: .55; cursor: wait; }
 .chat-modal__hint { margin: 8px 0 0; color: #7c8ba0; font-size: 8px; line-height: 1.6; }
 .chat-modal__counter { margin-top: 5px; color: #758398; text-align: right; font-size: 8px; }
 .chat-modal__error { margin: 10px 0 0; color: #e6a5a8; font-size: 9px; line-height: 1.5; }

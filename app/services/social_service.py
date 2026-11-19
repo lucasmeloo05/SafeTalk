@@ -240,6 +240,55 @@ def remove_friend(db: Session, actor_id: int, other_id: int):
     return _friendship_response(db, row, actor_id)
 
 
+def block_user(db: Session, actor_id: int, target_id: int):
+    if actor_id == target_id:
+        raise HTTPException(400, "Você não pode bloquear a si mesmo.")
+    try:
+        _lock_users(db, actor_id, target_id)
+        target = db.get(User, target_id)
+        if target is None or not target.is_active:
+            raise HTTPException(404, "Usuário indisponível.")
+        if db.scalar(select(Block.id).where(
+            Block.blocker_id == actor_id, Block.blocked_id == target_id
+        )) is not None:
+            raise HTTPException(409, "Usuário já bloqueado.")
+        low, high = sorted((actor_id, target_id))
+        friendship = db.scalar(select(Friendship).where(
+            Friendship.user_a_id == low, Friendship.user_b_id == high,
+            Friendship.status.in_(("PENDING", "ACCEPTED")),
+        ).with_for_update())
+        if friendship is not None:
+            friendship.status = "REMOVED" if friendship.status == "ACCEPTED" else "CANCELLED"
+            friendship.responded_at = datetime.now(timezone.utc)
+        db.add(Block(blocker_id=actor_id, blocked_id=target_id))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def unblock_user(db: Session, actor_id: int, target_id: int):
+    try:
+        _lock_users(db, actor_id, target_id)
+        block = db.scalar(select(Block).where(
+            Block.blocker_id == actor_id, Block.blocked_id == target_id,
+        ).with_for_update())
+        if block is None:
+            raise HTTPException(404, "Bloqueio não encontrado.")
+        db.delete(block)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def list_blocks(db: Session, actor_id: int, limit: int, offset: int):
+    rows = db.execute(select(User.id, User.username).join(Block, Block.blocked_id == User.id)
+                      .where(Block.blocker_id == actor_id).order_by(Block.id.desc())
+                      .limit(limit).offset(offset))
+    return [{"id": row.id, "username": row.username} for row in rows]
+
+
 def get_privacy_settings(db: Session, user_id: int):
     settings = db.get(UserPrivacySettings, user_id)
     if settings is None:
