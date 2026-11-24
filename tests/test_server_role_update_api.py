@@ -401,14 +401,14 @@ def test_permissions_are_replaced_and_empty_object_clears_role_grants(
         client,
         server["id"],
         role.id,
-        auth_headers(owner),
+        {**auth_headers(owner), "X-Expected-Permissions": '{"kick_members":true,"ban_members":true}'},
         {"permissions": {"kick_members": False}},
     )
     cleared = _patch_role(
         client,
         server["id"],
         role.id,
-        auth_headers(owner),
+        {**auth_headers(owner), "X-Expected-Permissions": "{}"},
         {"permissions": {}},
     )
 
@@ -416,6 +416,29 @@ def test_permissions_are_replaced_and_empty_object_clears_role_grants(
     assert replacement.json()["permissions"] == {"kick_members": False}
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["permissions"] == {}
+
+
+@pytest.mark.parametrize("payload, known", [
+    ({"name": "Outro nome"}, {"ban_members": True}),
+    ({"description": None}, {"ban_members": True}),
+    ({"permissions": {"kick_members": True}}, {"kick_members": True}),
+    ({"permissions": {}}, {}),
+])
+def test_patch_preserves_stored_legacy_permissions(
+    client, db_session, create_user, auth_headers, payload, known
+):
+    owner = create_user()
+    server = _create_server(client, owner, auth_headers)
+    legacy = {"legacy_flag": True, "legacy_metadata": {"version": 1}}
+    role = _add_role(db_session, server["id"], name="Original", position=3,
+                     permissions={**legacy, "ban_members": True})
+
+    headers = {**auth_headers(owner), "X-Expected-Permissions": '{"ban_members":true}'}
+    response = _patch_role(client, server["id"], role.id, headers, payload)
+
+    assert response.status_code == 200, response.text
+    db_session.refresh(role)
+    assert role.permissions == response.json()["permissions"] == {**legacy, **known}
 
 
 def test_get_and_post_role_routes_remain_available(

@@ -152,6 +152,36 @@ def test_owner_put_assigns_role_with_204_and_authenticated_assigner(
     assert audit[0].changed_by == owner["id"]
 
 
+@pytest.mark.parametrize(("permissions", "self_assignment"), [
+    ({"manage_roles": True}, False),
+    ({"ban_members": True, "manage_invites": True}, False),
+    ({"manage_roles": True}, True),
+])
+def test_owner_can_assign_grants_without_holding_them(
+    client, db_session, create_user, auth_headers, permissions, self_assignment
+):
+    owner = create_user()
+    headers = auth_headers(owner)
+    server_id = _create_server(client, owner, auth_headers)["id"]
+    target = owner if self_assignment else create_user()
+    if not self_assignment:
+        _member(db_session, server_id, target["id"])
+    path = f"/servers/{server_id}"
+    context = client.get(f"{path}/authorization-context", headers=headers)
+    assert context.status_code == 200
+    assert context.json()["effective_permissions"] == []
+    created = client.post(f"{path}/roles", headers=headers, json={
+        "name": "Delegado", "position": 5, "permissions": permissions,
+    })
+    assert created.status_code == 201, created.text
+
+    assigned = _assign_route(client, server_id, target["id"], created.json()["id"], headers)
+    assert assigned.status_code == 204, assigned.text
+    result = client.get(f"{path}/authorization-context", headers=auth_headers(target))
+    assert result.status_code == 200
+    assert set(result.json()["effective_permissions"]) == set(permissions)
+
+
 def test_authorized_manager_can_put_role_below_own_hierarchy(
     client, db_session, create_user, auth_headers
 ):

@@ -1,12 +1,14 @@
 # Status do projeto
 
-**Última atualização do status:** 18/11/2026.
+**Última atualização do status:** 24/11/2026.
 
-**Última validação completa reportada:** backend com 548 testes aprovados, frontend com 54 testes aprovados e build de produção aprovado. O teste de concorrência da criação recíproca de conversas também foi aprovado usando duas sessões PostgreSQL independentes.
+**Validação da entrega de mensagens em canais:** 686 testes backend aprovados no PostgreSQL isolado de testes (porta 55432), 204 testes frontend aprovados em 12 arquivos e build de produção aprovado. O teste da migration executou upgrade com canal preexistente, downgrade e novo upgrade em schema temporário do banco isolado.
+
+**Validação histórica reportada em 20/11/2026:** backend com 630 testes aprovados, frontend com 87 testes aprovados e build de produção aprovado. A cadeia de migrations foi reportada como validada em PostgreSQL descartável até `a8c37d4e91b2`.
 **Validação anterior:** `tests/test_social_api.py`: 16 passed no PostgreSQL isolado `plataforma_tcc_test` (`127.0.0.1:55432`); `social.test.tsx`: 4 passed; frontend completo: 50 passed em 8 arquivos; build aprovado. Esses resultados são históricos e foram substituídos pelos números acima.
 **Validações históricas reportadas:** 32 testes backend aprovados nos testes de análise e API oficial; 32 testes frontend aprovados em 7 arquivos. Também foi reportado teste real da integração OpenAI em duas denúncias de exemplo, preservadas como evidências no banco de desenvolvimento; essa evidência não foi consultada nesta atualização.
 **Última consulta ao estado Alembic do banco de desenvolvimento documentada:** 10/11/2026 (`bc365585aa97`, então head). A revisão `8a62d13e4f90` foi criada depois; o estado atual do banco de desenvolvimento não foi verificado nesta atualização documental.
-Este documento descreve o estado verificado nessa análise e deve ser atualizado após mudanças futuras.
+Os números de 20/11 e os resultados anteriores foram preservados como histórico.
 
 ## Resumo
 
@@ -28,7 +30,8 @@ O repositório contém backend FastAPI com PostgreSQL, SQLAlchemy e Alembic, e f
 - **Banco local:** Docker Compose define PostgreSQL 17, volume persistente, healthcheck e publicação `5433:5432`. Não define serviço da API nem Dockerfile.
 - **Banco de testes:** `docker-compose.test.yml` define PostgreSQL 17 isolado, com container e volume próprios e porta `55432`; os testes usam `plataforma_tcc_test`.
 - **Testes:** `pytest.ini`, `requirements-test.txt` e `tests/`; o `conftest.py` valida host local, porta, usuário e nome exato do banco de testes, substitui a dependência de banco da API e usa segredo JWT sintético. A fixture cria e remove as tabelas no banco de testes via metadata e reverte os dados de cada caso; não executa Alembic.
-- **Etapa 2 de servidores:** convites, kick/ban/unban e consulta de banimentos/auditoria possuem implementação em serviços e rotas. Transferência de propriedade, canais privados e mensagens de servidor permanecem planejados; as regras documentadas não significam que esses itens pendentes já estejam implementados.
+- **Servidores:** transferência de propriedade e canais públicos/privados com autorização por cargos estão implementados e possuem testes. Mensagens em canais estão disponíveis na API e nos detalhes do servidor.
+- **Descoberta e entrada em servidores:** não há catálogo nem busca pública. `GET /servers/` retorna somente servidores nos quais o usuário autenticado possui participação `ACTIVE`, e conhecer um ID não concede acesso. A entrada e a reentrada exigem convite válido. `Server.is_discoverable` permanece como campo interno do modelo, sem efeito operacional e sem exposição em schemas ou respostas. O campo não integra `ServerCreate` nem `ServerUpdate`, que rejeitam campos extras.
 - **Dependências:** `requirements.txt` fixa versões de FastAPI, SQLAlchemy, Alembic, Psycopg, PyJWT, pwdlib e outras bibliotecas.
 
 ## Endpoints disponíveis observados
@@ -45,6 +48,9 @@ O repositório contém backend FastAPI com PostgreSQL, SQLAlchemy e Alembic, e f
 | `GET /users/me/privacy` | Consulta as preferências de privacidade do usuário autenticado | Bearer JWT |
 | `PATCH /users/me/privacy` | Atualiza parcialmente `allow_messages_from_strangers` e/ou `allow_friend_requests` do próprio usuário | Bearer JWT |
 | `GET /social/friends` | Lista amizades aceitas paginadas | Bearer JWT |
+| `GET /social/blocks` | Lista os usuários bloqueados pelo usuário autenticado | Bearer JWT |
+| `PUT /social/blocks/{user_id}` | Bloqueia usuário e encerra relações pertinentes; não expõe publicamente a direção do bloqueio | Bearer JWT; ator vem do token |
+| `DELETE /social/blocks/{user_id}` | Desbloqueia usuário sem restaurar amizades anteriores | Bearer JWT; ator vem do token |
 | `GET /social/requests/received` | Lista solicitações recebidas paginadas | Bearer JWT |
 | `GET /social/requests/sent` | Lista solicitações enviadas paginadas | Bearer JWT |
 | `POST /social/requests` | Envia uma solicitação de amizade, sujeita a bloqueios e à preferência do destinatário | Bearer JWT |
@@ -56,11 +62,22 @@ O repositório contém backend FastAPI com PostgreSQL, SQLAlchemy e Alembic, e f
 | `GET /conversations/` | Lista conversas com participação ativa do usuário | Bearer JWT |
 | `POST /conversations/{conversation_id}/messages` | Envia mensagem após verificar participação e bloqueio | Bearer JWT |
 | `GET /conversations/{conversation_id}/messages` | Lista mensagens paginadas; aceita `limit` 1–100 e `offset` >= 0 | Bearer JWT |
+| `GET /conversations/{conversation_id}/messages/sync` | Sincroniza mensagens novas por cursor de criação | Bearer JWT; participante ativo e verificações de bloqueio |
+| `GET /conversations/{conversation_id}/message-updates` | Pagina eventos de atualização e estado atual das mensagens | Bearer JWT; participante ativo e verificações de bloqueio |
+| `PATCH /conversations/{conversation_id}/messages/{message_id}` | Edita mensagem do autor dentro de 15 minutos e emite evento | Bearer JWT; autoria, participação e bloqueios validados |
+| `DELETE /conversations/{conversation_id}/messages/{message_id}` | Apaga globalmente mensagem do autor sem limite de tempo e emite evento | Bearer JWT; autoria, participação e bloqueios validados |
 | `POST /servers/` | Cria servidor e participação ativa do proprietário na mesma transação | Bearer JWT |
 | `GET /servers/` | Lista servidores com participação `ACTIVE` do usuário | Bearer JWT |
 | `GET /servers/{server_id}` | Consulta servidor somente com participação ativa | Bearer JWT |
 | `PATCH /servers/{server_id}` | Proprietário atualiza nome e descrição; campos de configuração e `owner_id` não são aceitos | Bearer JWT |
+| `POST /servers/{server_id}/transfer-ownership` | Transfere propriedade a membro ativo não banido e registra auditoria | Bearer JWT; proprietário atual |
 | `PATCH /servers/{server_id}/everyone-permissions` | Proprietário ativo substitui toda a configuração; registra valores anterior/novo em `ServerConfigHistory` atomicamente | Bearer JWT |
+| `GET /servers/{server_id}/channels` | Lista canais visíveis, com paginação limitada | Bearer JWT; autorização por canal no serviço |
+| `POST /servers/{server_id}/channels` | Cria canal | Bearer JWT; somente proprietário |
+| `GET /servers/{server_id}/channels/{channel_id}` | Consulta canal conforme visibilidade e cargos autorizados | Bearer JWT; membro ativo autorizado ou proprietário |
+| `PATCH /servers/{server_id}/channels/{channel_id}` | Atualiza canal/visibilidade e registra auditoria | Bearer JWT; somente proprietário |
+| `DELETE /servers/{server_id}/channels/{channel_id}` | Exclui canal | Bearer JWT; somente proprietário |
+| `PUT/DELETE /servers/{server_id}/channels/{channel_id}/roles/{role_id}` | Concede/remove acesso de cargo ao canal privado | Bearer JWT; somente proprietário |
 | `GET /servers/{server_id}/members` | Lista membros `ACTIVE`, paginados, com dados mínimos | Bearer JWT e participação ativa do solicitante |
 | `GET /servers/{server_id}/members/{user_id}` | Consulta um membro `ACTIVE` do servidor | Bearer JWT e participação ativa do solicitante |
 | `POST /servers/{server_id}/leave` | Encerra a participação do usuário autenticado e limpa cargos individuais na mesma transação | Bearer JWT e participação ativa |
@@ -130,28 +147,28 @@ Constraints existentes incluem unicidade de username/e-mail, não auto bloqueio,
 - Acesso oficial: os endpoints `/official/reports` usam a dependência de `PlatformStaff`, que exige estado `ACTIVE` e `revoked_at IS NULL`; isso é separado de cargos/permissões de servidor. O código atual não diferencia capacidades de `ADMIN` e `MODERATOR` nas operações da fila.
 - Triagem e análise: toda tarefa nasce em `PENDING_TRIAGE`; sem aprovação humana a OpenAI não é chamada. A equipe pode recusar envio externo e manter a denúncia em revisão humana. A triagem também pode marcar suspeita de exploração sexual infantil, com justificativa; nesse caso a tarefa permanece inelegível e não é enviada à OpenAI. Não há classificador alternativo para reconhecer automaticamente esse conteúdo.
 - Worker: a outbox persistente acompanha pendente, processamento, concluído, falha e revisão manual. Reivindicação transacional utiliza locks, `SKIP LOCKED`, lease e `claim_token`; tentativas são limitadas e leases vencidos podem ser recuperados. A chamada externa acontece fora da transação de banco e envia somente o snapshot da mensagem denunciada, sem histórico da conversa. Resultados armazenam modelo, flag geral, categorias, scores e tipos de entrada disponíveis. Erros não registram texto privado nem conteúdo do provedor nos logs. O worker não aplica sanções.
-- Decisão humana: equipe oficial registra tipo de decisão e justificativa em `ModerationAction`; a denúncia passa a `REVIEWED` e tarefa ainda elegível é invalidada. A decisão final permanece humana e auditável; não há aplicação automática de punições.
+- Decisão humana e sanções: a equipe oficial registra decisão e justificativa em `ModerationAction`. Decisões humanas de advertência, suspensão ou banimento aplicam sanções no mesmo fluxo transacional; a IA não decide nem sanciona. Advertências válidas escalam para suspensão de sete dias e, na terceira, banimento permanente. Reversões e revisões de sanções derivadas são registradas sem apagar o histórico.
 
 ## Implementação parcial: modelos presentes, API incompleta
 
-- **Amizades:** busca autenticada de usuários, envio, listagem paginada de amigos/solicitações, aceitação, recusa, cancelamento e remoção de amizade estão implementados nos endpoints `/users/search` e `/social/...`. A busca valida o mínimo após remover espaços, retorna dados públicos mínimos, pagina por `limit`/`offset` e considera somente relações `PENDING` ou `ACCEPTED`; relações `CANCELLED`, `REJECTED` ou `REMOVED` aparecem como `NONE`. A interface Pessoas oferece paginação para busca e listas, descarta respostas de busca obsoletas e atualiza uma solicitação aceita no resultado. Não há endpoints de gerenciamento de bloqueios.
-- **Privacidade:** `GET` e `PATCH /users/me/privacy` permitem ao usuário autenticado consultar e alterar suas próprias preferências `allow_messages_from_strangers` e `allow_friend_requests`. A segunda controla novas solicitações de amizade; a primeira participa da autorização para iniciar conversa direta. `show_online_status` e `allow_group_invites` continuam sem API funcional confirmada.
-- **Bloqueios:** os modelos existem e bloqueios são consultados ao iniciar/reusar conversa direta, enviar mensagens e ler o histórico; bloqueio em qualquer direção impede essas operações sem apagar mensagens. A API de criar/remover/listar bloqueios permanece pendente. Amizades aceitas e privacidade do destinatário são verificadas antes de reativar uma participação `LEFT`.
+- **Amizades:** busca autenticada de usuários, envio, listagem paginada de amigos/solicitações, aceitação, recusa, cancelamento e remoção estão implementados nos endpoints `/users/search` e `/social/...`. A busca valida o mínimo após remover espaços, retorna dados públicos mínimos, pagina por `limit`/`offset` e considera somente relações `PENDING` ou `ACCEPTED`; relações `CANCELLED`, `REJECTED` ou `REMOVED` aparecem como `NONE`. A interface Pessoas oferece paginação para busca e listas, descarta respostas obsoletas e atualiza a solicitação aceita. O bloqueio tem endpoints próprios, descritos abaixo.
+- **Privacidade:** `GET` e `PATCH /users/me/privacy` permitem ao usuário autenticado consultar e alterar `allow_messages_from_strangers` e `allow_friend_requests`. `show_online_status` e `allow_group_invites` existem no modelo, mas não têm API funcional confirmada.
+- **Bloqueios:** criar, listar e remover bloqueios possui endpoints e interface. O bloqueio em qualquer direção impede início/reuso de conversa, envio e leitura de histórico; bloquear encerra amizades e solicitações pertinentes. O desbloqueio não restaura relações anteriores. Existem testes de API e concorrência.
 - **Grupos:** tabelas de conversa, participante e convite existem; não há endpoint de criação ou gestão de grupos, participantes, papéis ou convites.
-- **Servidores e participação:** CRUD básico, listagem/consulta de membros ativos, saída voluntária, CRUD e atribuição/remoção manual de cargos, resolução de grants, configuração de `everyone_permissions`, convites, kick/ban/unban e consultas de moderação/auditoria estão implementados. Saída, atribuições, mutações de cargos, moderação e aceitação de convites usam transações e autorização no serviço. Permanecem pendentes transferência de propriedade, canais privados e mensagens de servidor. As regras e o estado detalhado estão em [ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md](ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md).
-- **Mensagens/exclusões:** envio e leitura estão disponíveis; existe tabela/campos para exclusão e timestamp de edição, mas não há endpoints/serviços para editar ou excluir, nem histórico de edição.
-- **Denúncias/moderação:** backend e frontend possuem fluxo funcional de denúncia, revisão oficial, triagem e resultado de moderação. Permanecem fora do código ações punitivas automáticas, gestão completa de penalidades e appeals; resultados da IA não são decisões finais.
-- **Verificação de conta:** `is_verified` existe no modelo/resposta, mas não há fluxo para verificar conta. Novos usuários não recebem verificação por este endpoint.
+- **Servidores e participação:** criação, edição básica, listagem/consulta de membros ativos, saída, transferência de propriedade, CRUD/atribuição de cargos, permissões, canais públicos/privados, convites, kick/ban/unban e auditoria possuem implementação backend e testes. Mensagens em canais estão disponíveis na API e nos detalhes do servidor.
+- **Mensagens:** envio, histórico, sincronização incremental, edição pelo autor em até 15 minutos e exclusão global pelo autor sem limite de tempo estão implementados. O cursor de eventos reflete atualizações de mensagens antigas; exclusão substitui o conteúdo visível, enquanto evidências de denúncia permanecem preservadas. O modelo e a filtragem de exclusão individual existem, mas não há operação HTTP confirmada para o usuário criar essa exclusão.
+- **Denúncias/moderação:** denúncia de mensagens privadas, snapshot imutável, triagem humana, análise externa elegível, revisão oficial, ações e sanções progressivas estão implementadas. A IA não aplica sanções. Há reversão de sanções e revisão auditável de sanções derivadas. Apelações e um fluxo separado de incidentes não foram encontrados.
+- **Verificação e idade:** o cadastro valida pelo menos 14 anos pela data declarada; o acesso +18 exige 18 anos no backend. `is_verified` permanece independente, sem verificação documental.
 
 ## Pendências de produto
 
-- Continuar o módulo de servidores conforme [ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md](ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md): transferência de propriedade, canais privados, mensagens de servidor e funções ainda não confirmadas no código. CRUD de cargos, atribuição/remoção, núcleo de participação, resolução de permissões, configuração de `@everyone`, comparação hierárquica, moderação e convites estão implementados.
-- Gestão completa de grupos, incluindo convites e transferência de administração.
-- Edição e exclusão de mensagens com regras de autoria, permissões, janela de 15 minutos e histórico.
-- API de gerenciamento de bloqueios; aplicação funcional de `show_online_status` e `allow_group_invites`.
-- Transferência de propriedade, acesso/configuração de canais privados, mensagens de servidor e outras operações ainda não presentes no código.
-- Gestão de penalidades humanas além do registro genérico de decisão, appeals e pontuação de segurança; não há punição automática.
-- Verificação de idade e acesso a espaços +18; autenticação em dois fatores.
+- Verificação documental de identidade, além da autodeclaração disponível.
+- Interface de administração completa de canais e política de retenção configurável.
+- Gestão completa de grupos, incluindo criação, convites, participantes e papéis.
+- Exclusão de contas e política de retenção/anonimização associada.
+- Privacidade operacional de presença online (`show_online_status`) e de convites para grupos (`allow_group_invites`).
+- Fluxo próprio de incidentes e apelações, se forem aprovados como requisitos de produto; hoje há denúncias, decisões e sanções, sem essas estruturas separadas.
+- Definir a finalidade de `ServerRole.is_default` e quais cargos existentes devem receber `is_system_role`.
 - Upload/armazenamento de arquivos fora do PostgreSQL e funcionalidades de mídia.
 - Voz em tempo real e WebRTC.
 - Notificações, menções, busca, verificação de links e recursos planejados em [CONTEXTO_TCC.md](CONTEXTO_TCC.md).
@@ -178,28 +195,27 @@ Constraints existentes incluem unicidade de username/e-mail, não auto bloqueio,
 ## Especificação aprovada e estado de implementação
 
 - As decisões da Etapa 2 estão consolidadas em `ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md` e resumidas em `CONTEXTO_TCC.md`; requisitos não significam implementação. Saída, expulsão e banimento são distintos: saída/expulsão encerram participação como `LEFT`, limpam cargos e não banem; expulsão permite retorno por convite, enquanto banimento ativo impede entrada até revogação. Estão aprovadas as permissões independentes `kick_members`, `ban_members`, `unban_members`, `manage_invites` e `manage_roles`, além de `mention_everyone`, hierarquia estrita, posições a partir de 1 e exceções do proprietário. Membros comuns com `manage_roles` precisam respeitar hierarquia e só podem conceder permissões que já possuem efetivamente. `ServerRole.is_system_role` e `Server.everyone_permissions` estão no modelo e na revisão `8a62d13e4f90`; o resolvedor e a configuração owner-only também estão implementados. A classificação exata dos cargos reservados continua pendente. A atribuição/remoção de cargos, kick/ban/unban e convites têm serviços e rotas; os fluxos de reentrada por convite verificam banimentos ativos. `ServerBan` e `ServerAuditLog` são modelos e têm migration no código; isso não indica que a migration tenha sido aplicada ao banco de desenvolvimento. `@everyone` não concede acesso a canais privados.
-- Além do CRUD básico e do núcleo de participação, estão implementados o CRUD e a atribuição/remoção manual de cargos, o resolvedor central, a configuração owner-only de `everyone_permissions`, o cálculo/comparação hierárquica, convites, kick/ban/unban e consultas de moderação/auditoria. Permanecem pendentes transferência de propriedade, canais privados e mensagens de servidor.
-- Permanecem pendentes decisões de produto fora do conjunto consolidado: catálogo de permissões além das aprovadas, finalidade de `is_default`, identificação exata dos cargos reservados ao sistema e seu mapeamento nos registros existentes antes da migration, representação persistente de acesso privado por cargo, detalhamento dos limites para permissões funcionais em JSONB além do teto de concessão já aprovado, política HTTP para recursos privados, eventos adicionais de auditoria além dos já aprovados, política de ciclo de vida de servidor/canal e detalhes da verificação de idade. Já está decidido que somente o proprietário altera `Server.everyone_permissions` e configura cargos autorizados por canal privado; `manage_roles` não concede essas autoridades. Acesso privado por `@everyone` não está pendente: foi decidido que ele não concede acesso.
+- Além do CRUD básico e do núcleo de participação, estão implementados transferência de propriedade, CRUD e atribuição/remoção de cargos, resolvedor central, configuração owner-only de `everyone_permissions`, hierarquia, convites, kick/ban/unban, consultas de moderação/auditoria e canais privados com grants por cargo. Mensagens em canais estão disponíveis na API e nos detalhes do servidor.
+- Decisões ainda abertas incluem a finalidade de `ServerRole.is_default`, a classificação concreta dos cargos `is_system_role`, eventual verificação documental de identidade, exclusão/anonimização de contas e o escopo de incidentes/apelações. Mensagens em canais estão disponíveis na API e nos detalhes do servidor. Já está implementado que somente o proprietário altera `everyone_permissions` e configura grants dos canais; `manage_roles` não concede essas autoridades e `@everyone` não dá acesso a canal privado.
 - A análise estática encontrou `is_default` sem regra funcional; o preflight autorizado de leitura encontrou zero registros `is_default=true` e zero posições inválidas. A migration de posição `990fa9af113d` foi validada apenas em PostgreSQL descartável e não foi aplicada aos bancos de desenvolvimento ou testes.
-- Os modelos/tabelas existentes continuam sendo a base de dados. Há testes de serviço/API para CRUD, atribuição/remoção de cargos, moderação e convites, incluindo cenários de concorrência. Canais privados, transferência de propriedade e mensagens de servidores ainda não estão implementados.
+- Há testes de serviço/API para CRUD de servidores, transferência de propriedade, canais privados, cargos, convites e moderação, inclusive cenários concorrentes. Mensagens em canais estão disponíveis na API e nos detalhes do servidor.
 
 ### Diferenças entre decisões e modelos atuais
 
 - `Server.everyone_permissions` JSONB e a constraint de objeto estão no modelo e na revisão Alembic `8a62d13e4f90`; a rota de substituição integral, validação estrita, autorização owner-only e gravação transacional em `ServerConfigHistory` estão implementadas. A revisão no banco de desenvolvimento não foi verificada nesta atualização.
-- `ServerChannel` não armazena visibilidade nem cargos autorizados; a concessão de acesso privado por cargo ainda não tem representação persistente no modelo.
-- A decisão de autorização está definida, mas não implementada: somente o proprietário configurará cargos autorizados em canais privados; concessões e remoções precisarão de auditoria transacional. `manage_roles` não concederá essa autoridade, e `@everyone` continuará sem acesso privado.
+- `ServerChannel.is_private` e `ServerChannelRole` armazenam visibilidade e grants por cargo. O serviço aplica o acesso a membros ativos e ao proprietário, restringe configuração ao proprietário e audita mudanças de visibilidade e acesso.
 - `ServerMemberRole` permite associações entre membros e cargos; saída, kick e ban removem atribuições no fluxo correspondente. A API oferece atribuição e remoção manual. Criação/edição/exclusão e atribuição/remoção aplicam autorização e hierarquia nos serviços; os serviços de kick/ban/unban também usam as permissões e a comparação hierárquica pertinentes.
 - `ServerMember` representa participação `ACTIVE`/`LEFT`, `left_at` e unicidade `(server_id, user_id)`. Listagem/consulta, saída voluntária, expulsão, banimento e reentrada por convite estão implementados; reentrada atualiza a participação existente e não restaura cargos.
 - O serviço central calcula a união de grants documentados de `everyone_permissions` e cargos individuais para membros ativos. As operações implementadas de cargos e moderação aplicam suas verificações de autorização/hierarquia e limites contra escalada conforme cada fluxo.
 - Os limites aprovados para concessão de permissões (`manage_roles`, grants efetivos do ator, delta e validação dos membros afetados) são aplicados nos serviços de criação/edição e na atribuição de cargos; a remoção de atribuição também valida autorização e hierarquia.
 - `ServerRole.is_default` é um booleano não nulo com default Python `False`; o índice único parcial `uq_server_roles_one_default` permite no máximo um cargo marcado por servidor. Não há lógica de autorização que o use; a resposta o expõe sem nova semântica. A migration original não define default no banco. `@everyone` é distinta em `Server.everyone_permissions`. `ServerRole.is_system_role` é independente e a proteção backend contra edição/exclusão está implementada para registros marcados; a lista/classificação exata e o mapeamento continuam pendentes.
 - `ServerRole.position` é inteiro não nulo sem default Python ou de banco; o modelo e a revisão `990fa9af113d` impõem `position >= 1` com `ck_server_roles_position_positive`. Posições iguais são permitidas. O cálculo e a comparação hierárquica centralizada estão implementados e utilizados pelos serviços de cargos e moderação.
-- Os modelos `ServerBan` e `ServerAuditLog`, a revisão Alembic `d8f4c2b19a70`, os serviços de kick/ban/unban e os endpoints de moderação estão presentes no código. O sistema de convites também tem serviço e rotas de criação, listagem, revogação e aceitação. Transferência de propriedade, canais privados e mensagens de servidor permanecem pendentes.
+- Os modelos `ServerBan` e `ServerAuditLog`, a transferência de propriedade, os canais privados e seus serviços/rotas estão no código. Mensagens em canais estão disponíveis na API e nos detalhes do servidor.
 - Esses pontos são lacunas de implementação/modelagem. A etapa de CRUD básico usou o schema existente e não criou migration.
 
 ## Migrações e banco observado
 
-A cadeia de revisões Alembic presente no repositório contém doze arquivos:
+A cadeia de revisões Alembic presente no repositório contém dezoito arquivos e, pela inspeção dos `down_revision`, forma uma sequência linear até `a8c37d4e91b2`:
 
 1. `f46a25e64a14`: tabela de usuários.
 2. `b3a25b568222`: data de nascimento de usuários.
@@ -213,11 +229,72 @@ A cadeia de revisões Alembic presente no repositório contém doze arquivos:
 10. `a14c77b204fe`: cria denúncias e evidências; sua revisão anterior é `d8f4c2b19a70`.
 11. `e3810d7bc42a`: acrescenta metadados históricos ao snapshot da mensagem denunciada; sua revisão anterior é `a14c77b204fe`.
 12. `f6a4c20d93b1`: cria a fila persistente de análise; sua revisão anterior é `e3810d7bc42a`.
+13. `c7a91d52e604`: cria o contador e os eventos de atualização de mensagens; sua revisão anterior é `f6a4c20d93b1`.
+14. `ee65b71a98a3`: cria o histórico interno de edições; sua revisão anterior é `c7a91d52e604`.
+15. `9fb23a71c8d0`: vincula o histórico de edição ao evento da mesma mensagem; sua revisão anterior é `ee65b71a98a3`.
+16. `c2f8a41d6b93`: acrescenta evento de transferência de propriedade à auditoria de servidor; sua revisão anterior é `9fb23a71c8d0`.
+17. `d7af10e95bc2`: cria canais privados e eventos históricos de acesso; sua revisão anterior é `c2f8a41d6b93`.
+18. `a8c37d4e91b2`: acrescenta decisões e sanções de moderação da plataforma; sua revisão anterior é `d7af10e95bc2`.
 
 Consulta somente leitura ao banco de desenvolvimento realizada em 10/11/2026 indicou `bc365585aa97 (head)`, antes da criação da revisão `8a62d13e4f90`. Isso é um registro histórico, não uma confirmação do estado atual do banco. Esta atualização documental não consultou banco nem executou migration; portanto, o estado atual do banco de desenvolvimento permanece não verificado.
 
 ## Verificação desta análise
 
-- Regressão completa histórica: **464 passed, 0 failed, 0 skipped**, exclusivamente em `plataforma_tcc_test` (`127.0.0.1:55432`), anterior às validações mais recentes registradas no início deste documento. A cobertura conhecida inclui cargos, convites e moderação, com testes de serviço/API e cenários de concorrência. Nenhum teste foi executado nesta atualização documental.
+- Última regressão completa reportada antes desta atualização: **630 testes backend aprovados**, **87 testes frontend aprovados** e build de produção aprovado. A cadeia Alembic foi reportada validada em PostgreSQL descartável até `a8c37d4e91b2`. Esses resultados são históricos informados e não foram reexecutados nesta atualização documental.
 - A URL de testes é validada pelo `tests/conftest.py` para `plataforma_tcc_test`, host local, porta 55432 e usuário `tcc_test`; o banco de desenvolvimento na porta 5433 não foi usado na execução documentada.
 - A revisão `990fa9af113d` foi validada em PostgreSQL 17 descartável por `upgrade head`, `downgrade 8a62d13e4f90` e novo `upgrade head`, todos com código zero; essa revisão não foi aplicada aos bancos de desenvolvimento ou testes. A revisão `d8f4c2b19a70` foi validada no ambiente PostgreSQL de testes em etapa posterior. O estado atual do banco de desenvolvimento não foi consultado nesta atualização documental.
+
+
+## Mensagens em canais de servidor
+
+A revisão `b241de8f753a` sucede `a8c37d4e91b2`. Ela cria uma conversa interna do tipo CHANNEL por canal existente e mantém a publicação habilitada em canais de texto comuns. Criação de canais novos inicializa a conversa na mesma transação. O histórico usa mensagens, versões de edição e eventos existentes. O polling inclui criações, edições e exclusões com revisão monotônica por canal.
+
+Em **Servidores → detalhes → Abrir canais**, o membro pode selecionar um canal acessível, consultar o histórico e denunciar mensagens de outros participantes. O proprietário pode configurar somente leitura. A exclusão de um canal com histórico o arquiva, preservando referências e evidências. Retenção automática e comunicação por áudio permanecem fora desta entrega.
+
+Ver contratos, cursores e regras em `ESPECIFICACAO_AUTORIZACAO_SERVIDORES.md`. A aplicação da migration no banco de desenvolvimento depende de autorização.
+
+
+## Autenticação em dois fatores
+
+Validação desta entrega: suíte backend completa com 692 testes aprovados; suíte frontend com 207 testes aprovados em 13 arquivos (`npm test -- --maxWorkers=2`); build de produção aprovado. A migration foi exercitada em schema temporário do PostgreSQL isolado por upgrade, downgrade e novo upgrade.
+
+A revisão `e21b7c84a603`, posterior a `b241de8f753a`, acrescenta configuração criptografada, desafios persistentes e auditoria. A seção Segurança e 2FA permite ativar TOTP, ver QR Code/chave manual, confirmar e guardar dez códigos de recuperação de uso único, regenerar e desativar com senha e segundo fator.
+
+Variável obrigatória para configurar TOTP: `TWO_FACTOR_ENCRYPTION_KEY`, uma chave Fernet base64 de 32 bytes, independente de `JWT_SECRET_KEY`. Provisionar pelo gerenciador de segredos do ambiente. Para gerar localmente: executar `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` em terminal privado, transferir para a configuração e preservar uma cópia segura. Nenhuma chave real foi adicionada ao projeto. Não substituir a chave de uma instalação com usuários ativos: isso exige recriptografia controlada dos segredos. A versão atual permite regeneração do segredo por desativação e nova configuração, com prova forte.
+
+Contratos:
+- POST /users/login preserva a resposta de token em contas sem 2FA; em contas com 2FA retorna somente two_factor_required, challenge e expires_in.
+- POST /users/login/2fa recebe challenge, code e recovery (booleano), consome o desafio e retorna o JWT normal.
+- GET /users/me/2fa retorna somente enabled.
+- POST /users/me/2fa/setup exige senha atual. Retorna QR SVG e chave manual somente na criação da configuração pendente, válida por dez minutos.
+- POST /users/me/2fa/confirm exige senha e TOTP. Ativa e retorna dez recovery_codes e JWT renovado.
+- POST /users/me/2fa/regenerate exige senha e TOTP ou recuperação. Invalida códigos e JWTs anteriores e retorna novo conjunto e JWT.
+- POST /users/me/2fa/disable exige a mesma prova forte, remove segredo/códigos, invalida desafios e JWTs anteriores e retorna um JWT renovado.
+
+O desafio aleatório dura cinco minutos, fica somente em memória no frontend e nunca serve como JWT. O banco guarda apenas seu hash. O lock por usuário serializa provas, consumo de recuperação e mudanças de configuração. Cinco provas inválidas bloqueiam novas tentativas por quinze minutos. TOTP aceita uma janela de 30 segundos anterior/posterior e impede reutilizar o mesmo passo temporal. Após ativar ou regenerar, aguardar o próximo código do autenticador ou usar uma recuperação para entrar novamente. Senhas e sanções continuam verificadas. A recuperação de senha não possui fluxo implementado e não contorna o segundo fator.
+
+Para demonstrar em ambiente autorizado, provisionar a chave, aplicar a migration, acessar Segurança e 2FA, informar a senha e ler o QR em um autenticador. Confirmar o código, guardar as recuperações e sair. O próximo login exige o código da etapa temporal seguinte ou uma recuperação. Após usá-la, tentar novamente comprova uso único. A chave e os códigos não devem ser salvos em logs ou compartilhados.
+
+
+## Pacote C — autodeclaração e servidores +18
+
+Validação backend completa: 722 testes aprovados em 177,42 segundos no PostgreSQL isolado de testes, porta 55432. Frontend completo: 211 testes aprovados em 14 arquivos, em 60,97 segundos, com dois workers. O build de produção foi aprovado. A primeira execução completa apontou uma consulta adicional na listagem de membros; a regra etária passou a compartilhar a consulta existente e a asserção original de três consultas foi preservada.
+
+O cadastro valida a idade mínima de 14 anos. A declaração legada é feita em POST /users/me/birth-date com senha; a data preenchida não pode ser editada nesta versão. GET /users/me continua restrito ao próprio usuário e os contratos públicos de busca não expõem nascimento.
+
+ServerCreate recebe is_adult booleano estrito, que não pertence a ServerUpdate. A resposta de servidor expõe a classificação. A criação de servidor +18 requer adulto. Todos os routers de servidores usam uma dependência comum para negar acesso etário, além das autorizações existentes. A listagem exclui servidores +18 inacessíveis. O aceite de convite revalida a idade no serviço sob o lock do servidor, antes de consumir usos ou criar/reativar participação. Canais e mensagens revalidam idade pelo serviço de acesso. A transferência exige elegibilidade etária do destinatário. Evidências de canais +18 também são filtradas para equipe oficial menor ou sem data válida.
+
+Os campos existentes birth_date e is_adult foram reutilizados. Esta entrega não cria migration. A autodeclaração não representa verificação documental nem altera is_verified.
+
+
+## Pacote D — integração e preparação da demonstração
+
+Em 24/11/2026 foram executados 724 testes backend (193,51 s), 212 testes frontend em 15 arquivos (69,95 s) e build de produção, todos aprovados. O backend usou exclusivamente plataforma_tcc_test em 127.0.0.1:55432. Foram incluídos um fluxo por HTTP loopback real combinando os Pacotes A/B/C e um ciclo completo das 20 migrations em schema temporário, com comparação de tabelas/colunas dos modelos. Isso não informa a revisão do banco de desenvolvimento, que não foi acessado.
+
+Correção comprovada: renovação do JWT por ativação/regeneração/desativação de 2FA não atualizava o timer visual da sessão. tokenStorage agora emite uma notificação sem dados sensíveis ao substituir um token e AuthProvider reagenda a expiração. O teste específico preserva a sessão até a expiração renovada.
+
+O ensaio no Chrome local validou frontend real → API temporária → PostgreSQL isolado para login sem 2FA, listagem/detalhes de servidores, histórico de canal +18, envio, persistência após recarga, seleção de outro canal sem conteúdo anterior e logout. Contas e mensagens eram fictícias em schema exclusivo de ensaio. O worker permaneceu desligado, sem chamadas OpenAI.
+
+Configuração local: TWO_FACTOR_ENCRYPTION_KEY ausente; requer provisionamento pelo operador antes de ativação real. A chave OpenAI foi detectada no arquivo local, mas o worker lê OPENAI_API_KEY do ambiente do processo. A flag de worker está habilitada no arquivo; os processos isolados usaram configuração desligada. Nenhuma credencial foi registrada neste relatório.
+
+Estado geral PARCIAL para demonstração completa: os fluxos automatizados passaram e houve ensaio de navegação real, mas faltam autenticador físico, login 2FA pela interface, polling simultâneo em dois navegadores e ensaio completo de moderação oficial. Ver docs/roteiro-demonstracao.md. Nenhuma migration nova foi criada neste pacote.

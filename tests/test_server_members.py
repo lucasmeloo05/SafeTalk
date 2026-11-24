@@ -7,6 +7,7 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy import event
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,7 @@ from app.models import (
     User,
 )
 from app.settings import settings
+from app.services.server_member_service import list_active_server_members
 from conftest import test_engine
 
 
@@ -98,7 +100,7 @@ def test_member_list_returns_only_active_members_and_minimal_profile(
         active_user["id"],
     }
     assert all(
-        set(member) == {"user_id", "username", "joined_at"}
+        set(member) == {"user_id", "username", "joined_at", "roles"}
         for member in members
     )
     assert all(member["user_id"] != left_user["id"] for member in members)
@@ -160,10 +162,115 @@ def test_member_detail_returns_only_active_member_without_personal_data(
     member_data = response.json()
     assert member_data["user_id"] == owner["id"]
     assert member_data["username"] == owner["username"]
-    assert set(member_data) == {"user_id", "username", "joined_at"}
+    assert set(member_data) == {"user_id", "username", "joined_at", "roles"}
+    assert member_data["roles"] == []
     assert member_data["joined_at"]
     assert left_response.status_code == missing_response.status_code == 404
     assert left_response.json() == missing_response.json()
+
+
+def test_member_list_returns_all_individual_roles_by_highest_position(
+    client, db_session, create_user, auth_headers
+):
+    owner = create_user()
+    member_user = create_user()
+    server_data = _create_server(client, auth_headers(owner))
+    server = db_session.get(Server, server_data["id"])
+    member = _add_member(db_session, server_data["id"], member_user["id"])
+    assert server is not None
+    server.everyone_permissions = {"manage_invites": True}
+    lower = ServerRole(
+        server_id=server.id,
+        name="Auxiliar",
+        position=2,
+        permissions={"kick_members": True},
+    )
+    higher = ServerRole(
+        server_id=server.id,
+        name="Moderador",
+        position=7,
+        permissions={"manage_roles": True},
+    )
+    db_session.add_all([lower, higher])
+    db_session.flush()
+    db_session.add_all([
+        ServerMemberRole(
+            server_id=server.id,
+            member_id=member.id,
+            role_id=lower.id,
+            assigned_by=owner["id"],
+        ),
+        ServerMemberRole(
+            server_id=server.id,
+            member_id=member.id,
+            role_id=higher.id,
+            assigned_by=owner["id"],
+        ),
+    ])
+    db_session.flush()
+
+    response = client.get(
+        f"/servers/{server.id}/members",
+        headers=auth_headers(owner),
+    )
+
+    assert response.status_code == 200, response.text
+    owner_row = next(item for item in response.json() if item["user_id"] == owner["id"])
+    member_row = next(item for item in response.json() if item["user_id"] == member_user["id"])
+    assert owner_row["roles"] == []
+    assert member_row["roles"] == [
+        {"id": higher.id, "name": "Moderador", "position": 7},
+        {"id": lower.id, "name": "Auxiliar", "position": 2},
+    ]
+    assert all(set(role) == {"id", "name", "position"} for role in member_row["roles"])
+
+
+def test_member_list_uses_constant_query_count_for_a_page(
+    db_session, create_user, auth_headers, client
+):
+    owner = create_user()
+    member_user = create_user()
+    server_data = _create_server(client, auth_headers(owner))
+    member = _add_member(db_session, server_data["id"], member_user["id"])
+    role = ServerRole(
+        server_id=server_data["id"],
+        name="Cargo paginado",
+        position=4,
+        permissions={"kick_members": True},
+    )
+    db_session.add(role)
+    db_session.flush()
+    db_session.add(ServerMemberRole(
+        server_id=server_data["id"],
+        member_id=member.id,
+        role_id=role.id,
+        assigned_by=owner["id"],
+    ))
+    db_session.flush()
+    actor = db_session.get(User, owner["id"])
+    assert actor is not None
+    statements: list[str] = []
+
+    def capture_select(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    connection = db_session.connection()
+    event.listen(connection, "before_cursor_execute", capture_select)
+    try:
+        page = list_active_server_members(
+            db_session,
+            actor,
+            server_data["id"],
+            limit=20,
+            offset=0,
+        )
+    finally:
+        event.remove(connection, "before_cursor_execute", capture_select)
+
+    assert len(page) == 2
+    assert any(item.user_id == member_user["id"] and item.roles for item in page)
+    assert len(statements) == 3
 
 
 def test_member_detail_does_not_expose_user_from_another_server(

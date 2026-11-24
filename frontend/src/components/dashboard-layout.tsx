@@ -4,6 +4,7 @@ import {
   LogOut,
   MessageCircle,
   MessagesSquare,
+  Server,
   ShieldCheck,
   Users,
 } from 'lucide-react';
@@ -43,11 +44,18 @@ export function DashboardLayout({ title, description, children, headerAction }: 
             <span>Pessoas</span>
             {location.pathname === '/pessoas' && <span className="dashboard-nav__active-mark" aria-hidden="true" />}
           </NavLink>
+          <NavLink to="/servidores" className={({ isActive }) => `dashboard-nav__link${isActive ? ' is-active' : ''}`}>
+            <Server size={18} strokeWidth={1.8} />
+            <span>Servidores</span>
+            {location.pathname.startsWith('/servidores') && <span className="dashboard-nav__active-mark" aria-hidden="true" />}
+          </NavLink>
           <NavLink to="/moderacao" className={({ isActive }) => `dashboard-nav__link${isActive ? ' is-active' : ''}`}>
             <ShieldCheck size={18} strokeWidth={1.8} />
             <span>Moderação</span>
             {location.pathname === '/moderacao' && <span className="dashboard-nav__active-mark" aria-hidden="true" />}
           </NavLink>
+          <NavLink className="dashboard-nav__link" to="/seguranca"><ShieldCheck size={18} /><span>Segurança e 2FA</span></NavLink>
+          <NavLink className="dashboard-nav__link" to="/idade"><ShieldCheck size={18} /><span>Declaração de idade</span></NavLink>
         </nav>
 
         <div className="dashboard-sidebar__grow" />

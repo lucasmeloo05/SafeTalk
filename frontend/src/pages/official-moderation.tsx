@@ -13,6 +13,7 @@ import {
   UserRound,
 } from 'lucide-react';
 import { ApiError } from '@/lib/api';
+import { SanctionHistory } from '@/components/sanction-history';
 import { DashboardLayout } from '@/components/dashboard-layout';
 import {
   getOfficialAnalysis,
@@ -20,12 +21,20 @@ import {
   listOfficialReports,
   submitOfficialDecision,
   submitOfficialTriage,
+  type ModerationHumanDecisionPayload,
   type ModerationAnalysisSummary,
   type ModerationReportDetail,
   type ModerationReportPage,
 } from '@/services/official-moderation-api';
 
 const PAGE_SIZE = 20;
+const DECISION_OPTIONS = [
+  ['NO_VIOLATION', 'Sem violação'],
+  ['REVIEWED_MANUALLY', 'Revisada sem sanção'],
+  ['WARNING', 'Advertência'],
+  ['TEMPORARY_SUSPENSION', 'Suspensão temporária (7 dias)'],
+  ['PERMANENT_BAN', 'Banimento permanente'],
+] as const;
 
 function dateTime(value: string | null | undefined) {
   if (!value) return 'Não disponível';
@@ -103,7 +112,7 @@ export function OfficialModerationPage() {
   const [sensitiveContentSuspected, setSensitiveContentSuspected] = useState(false);
   const [confirmExternalAnalysis, setConfirmExternalAnalysis] = useState(false);
   const [triageSubmitting, setTriageSubmitting] = useState(false);
-  const [decisionLabel, setDecisionLabel] = useState('');
+  const [decisionLabel, setDecisionLabel] = useState<ModerationHumanDecisionPayload['decision'] | ''>('');
   const [decisionReason, setDecisionReason] = useState('');
   const [decisionSubmitting, setDecisionSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -231,17 +240,19 @@ export function OfficialModerationPage() {
     event.preventDefault();
     const reportId = report?.id;
     if (reportId === undefined || reportId !== selectedId || loadedReportId !== reportId) return;
-    const decision = decisionLabel.trim();
+    const decision = decisionLabel;
     const reason = decisionReason.trim();
     if (!decision || decision.length > 50 || !reason || reason.length > 1000) return;
 
+    const label = DECISION_OPTIONS.find(([code]) => code === decision)?.[1];
+    if (!window.confirm(`Registrar “${label}” na denúncia #${reportId}?`)) return;
     setDecisionSubmitting(true);
     setActionError(null);
     setNotice(null);
     try {
       await submitOfficialDecision(reportId, { decision, reason });
       if (selectedIdRef.current === reportId) {
-        setNotice('Decisão humana registrada no histórico da denúncia. Nenhuma punição foi aplicada automaticamente.');
+        setNotice('Decisão humana e sanções aplicáveis registradas no histórico da denúncia.');
       }
       await refreshCurrent(reportId);
     } catch (error) {
@@ -313,6 +324,8 @@ export function OfficialModerationPage() {
                 <div className="moderation-report-facts">
                   <div><span>Denunciante</span><strong>Usuário #{activeReport.reporter_id}</strong></div>
                   <div><span>Autor da mensagem</span><strong>Usuário #{activeReport.evidence.message_author_id}</strong></div>
+                  {activeReport.evidence.channel_id != null && <div><span>Origem da mensagem</span>
+                    <strong>Servidor #{activeReport.evidence.server_id} · Canal #{activeReport.evidence.channel_id}</strong></div>}
                   <div><span>Status de triagem</span><StatusBadge value={activeReport.triage_status} /></div>
                   <div><span>Mensagem denunciada</span><strong>#{activeReport.evidence.message_id}</strong></div>
                 </div>
@@ -331,6 +344,7 @@ export function OfficialModerationPage() {
               </section>
 
               <AnalysisPanel analysis={activeAnalysis} />
+              <SanctionHistory key={activeReport.id} targetId={activeReport.evidence.message_author_id} />
 
               <section className="moderation-card" aria-labelledby="actions-title">
                 <header className="moderation-card__heading"><div><span className="moderation-card__icon moderation-card__icon--history"><Clock3 size={16} /></span><div><h3 id="actions-title">Histórico de ações</h3><p>Ações auditáveis registradas nesta denúncia</p></div></div></header>
@@ -360,10 +374,13 @@ export function OfficialModerationPage() {
               {canDecide && (
                 <section className="moderation-card moderation-form-card" aria-labelledby="decision-title">
                   <header className="moderation-card__heading"><div><span className="moderation-card__icon moderation-card__icon--history"><Check size={16} /></span><div><h3 id="decision-title">Registrar decisão humana</h3><p>A decisão ficará vinculada ao responsável e ao histórico.</p></div></div></header>
-                  <p className="moderation-note">O backend aceita um rótulo de decisão livre e uma justificativa. Nenhuma punição é aplicada automaticamente.</p>
+                  <p className="moderation-note">Advertências válidas são acumuladas. A segunda gera suspensão por 7 dias e a terceira gera banimento permanente.</p>
                   <form onSubmit={handleDecision}>
-                    <label htmlFor="decision-label">Decisão <span>até 50 caracteres</span></label>
-                    <input id="decision-label" value={decisionLabel} onChange={(event) => setDecisionLabel(event.target.value)} maxLength={50} required />
+                    <label htmlFor="decision-label">Decisão</label>
+                    <select id="decision-label" value={decisionLabel} onChange={(event) => setDecisionLabel(event.target.value as ModerationHumanDecisionPayload['decision'] | '')} required>
+                      <option value="">Selecione uma decisão</option>
+                      {DECISION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select>
                     <label htmlFor="decision-reason">Justificativa <span>obrigatória · até 1.000 caracteres</span></label>
                     <textarea id="decision-reason" value={decisionReason} onChange={(event) => setDecisionReason(event.target.value)} maxLength={1000} rows={3} required />
                     <div className="moderation-form__counter">{decisionReason.length} / 1.000</div>

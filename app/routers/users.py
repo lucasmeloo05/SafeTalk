@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pwdlib import PasswordHash
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -11,8 +11,11 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import User, UserPrivacySettings
+from app.two_factor_schemas import TwoFactorChallengeResponse
+from app.services.two_factor_service import begin_challenge
 from app.schemas import (
     TokenResponse,
+    BirthDateDeclaration,
     UserCreate,
     UserDiscoveryPage,
     UserLogin,
@@ -22,6 +25,10 @@ from app.schemas import (
 )
 from app.services.social_service import get_privacy_settings, search_users, update_privacy_settings
 from app.settings import settings
+from app.services.moderation_sanction_service import (
+    account_restriction_exception,
+    get_active_account_restriction,
+)
 
 
 router = APIRouter(prefix="/users", tags=["Usuários"])
@@ -83,9 +90,10 @@ def create_user(
     return user
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse | TwoFactorChallengeResponse)
 def login(
     login_data: UserLogin,
+    response: Response,
     db: Session = Depends(get_db),
 ):
     user = db.scalar(
@@ -113,23 +121,12 @@ def login(
             detail="Esta conta está desativada.",
         )
 
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=30)
+    restriction = get_active_account_restriction(db, user.id)
+    if restriction is not None:
+        raise account_restriction_exception(restriction)
 
-    token = jwt.encode(
-        {
-            "sub": str(user.id),
-            "iat": now,
-            "exp": expires_at,
-        },
-        settings.jwt_secret_key,
-        algorithm="HS256",
-    )
-
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-    }
+    response.headers["Cache-Control"] = "no-store"
+    return begin_challenge(db, user.id)
 
 
 @router.get("/me", response_model=UserResponse)
@@ -169,3 +166,22 @@ def patch_my_privacy_settings(
         current_user.id,
         payload.model_dump(exclude_unset=True),
     )
+
+@router.post("/me/birth-date", response_model=UserResponse)
+def declare_birth_date(data: BirthDateDeclaration, current_user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    try:
+        user = db.scalar(select(User).where(User.id == current_user.id).with_for_update()
+                         .execution_options(populate_existing=True))
+        if user.birth_date is not None:
+            raise HTTPException(409, "A data de nascimento já foi declarada e não pode ser alterada.")
+        if not password_hash.verify(data.password.get_secret_value(), user.password_hash):
+            raise HTTPException(403, "Não foi possível confirmar sua senha.")
+        user.birth_date = data.birth_date
+        db.flush()
+        result = UserResponse.model_validate(user)
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise

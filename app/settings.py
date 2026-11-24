@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5433
     jwt_secret_key: str
+    two_factor_encryption_key: str | None = None
     moderation_worker_enabled: bool = False
     moderation_worker_poll_seconds: float = 2.0
     moderation_openai_timeout_seconds: float = 20.0

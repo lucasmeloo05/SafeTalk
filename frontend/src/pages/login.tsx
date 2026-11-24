@@ -13,7 +13,7 @@ type LoginLocationState = {
 };
 
 export function LoginPage() {
-  const { signIn, sessionNotice } = useAuth();
+  const { signIn, verifySecondFactor, sessionNotice } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const locationState = location.state as LoginLocationState | null;
@@ -24,6 +24,8 @@ export function LoginPage() {
       : locationState?.sessionNotice ?? null,
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [challenge, setChallenge] = useState<string | null>(null);
+  const [recovery, setRecovery] = useState(false);
   const visibleNotice = notice ?? sessionNotice;
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -36,7 +38,11 @@ export function LoginPage() {
     const password = String(form.get("password") ?? "");
 
     try {
-      await signIn(login, password);
+      if (challenge) await verifySecondFactor(challenge, String(form.get("code") ?? ""), recovery);
+      else {
+        const next = await signIn(login, password);
+        if (next) { setChallenge(next); return; }
+      }
       navigate(locationState?.from?.pathname || "/app", { replace: true });
     } catch (cause) {
       setError(
@@ -59,11 +65,19 @@ export function LoginPage() {
       </div>
 
       <form className="auth-form" onSubmit={handleSubmit}>
-        <div className="field-group">
+        {!challenge && <><div className="field-group">
           <label className="field-label" htmlFor="login">Usuário ou e-mail</label>
           <input className="field-input" id="login" name="login" type="text" autoComplete="username" placeholder="Como podemos te chamar?" minLength={3} maxLength={255} required />
         </div>
-        <PasswordField id="password" label="Senha" autoComplete="current-password" maxLength={128} />
+        <PasswordField id="password" label="Senha" autoComplete="current-password" maxLength={128} /></>}
+        {challenge && <>
+          <label className="field-label">Código {recovery ? "de recuperação" : "do autenticador"}
+            <input className="field-input" name="code" required maxLength={64} autoComplete="one-time-code" />
+          </label>
+          <label><input type="checkbox" checked={recovery} onChange={e => setRecovery(e.target.checked)} />Usar código de recuperação</label>
+          <p>O desafio expira em cinco minutos.</p>
+          <button type="button" disabled={isSubmitting} onClick={() => { setChallenge(null); setError(null); }}>Reiniciar login</button>
+        </>}
         <div className="form-meta"><span className="muted-note">A sessão expira em até 30 minutos.</span></div>
         {visibleNotice && <p className="form-notice" role="status">{visibleNotice}</p>}
         {error && <p className="form-error" role="alert">{error}</p>}

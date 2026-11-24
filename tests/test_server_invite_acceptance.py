@@ -63,6 +63,14 @@ def _assert_http_error(call, expected_status):
     assert error.value.status_code == expected_status
 
 
+def _membership_id(db, response):
+    return db.scalars(select(ServerMember.id).where(
+        ServerMember.server_id == response.server_id,
+        ServerMember.user_id == response.user_id,
+        ServerMember.status == response.status,
+    )).one()
+
+
 def _seed_invite(
     db_session,
     server,
@@ -95,12 +103,12 @@ def test_first_invite_entry_creates_active_membership_and_consumes_use(
 ):
     owner, server = _server(db_session, create_user)
     entrant = create_user()
-    invite, token = create_server_invite(
+    invite = create_server_invite(
         db_session, server.id, owner["id"], max_uses=2
     )
 
     membership = accept_server_invite(
-        db_session, server.id, token, entrant["id"]
+        db_session, server.id, invite.token, entrant["id"]
     )
 
     assert membership.server_id == server.id
@@ -112,7 +120,7 @@ def test_first_invite_entry_creates_active_membership_and_consumes_use(
     assert db_session.scalars(
         select(ServerMemberRole).where(
             ServerMemberRole.server_id == server.id,
-            ServerMemberRole.member_id == membership.id,
+            ServerMemberRole.member_id == _membership_id(db_session, membership),
         )
     ).all() == []
 
@@ -128,11 +136,11 @@ def test_reentry_after_voluntary_leave_reuses_row_and_updates_joined_at(
     )
     db_session.commit()
     leave_server(db_session, db_session.get(User, user["id"]), server.id)
-    invite, token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
 
-    rejoined = accept_server_invite(db_session, server.id, token, user["id"])
+    rejoined = accept_server_invite(db_session, server.id, invite.token, user["id"])
 
-    assert rejoined.id == membership.id
+    assert _membership_id(db_session, rejoined) == membership.id
     assert rejoined.status == "ACTIVE"
     assert rejoined.left_at is None
     assert rejoined.joined_at > old_joined_at
@@ -145,11 +153,11 @@ def test_reentry_after_kick_is_allowed_without_ban(db_session, create_user):
     membership = _member(db_session, server, target)
     db_session.commit()
     kick_server_member(db_session, server.id, target["id"], owner["id"])
-    invite, token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
 
-    rejoined = accept_server_invite(db_session, server.id, token, target["id"])
+    rejoined = accept_server_invite(db_session, server.id, invite.token, target["id"])
 
-    assert rejoined.id == membership.id
+    assert _membership_id(db_session, rejoined) == membership.id
     assert rejoined.status == "ACTIVE"
     assert rejoined.left_at is None
     assert db_session.get(ServerInvite, invite.id).uses_count == 1
@@ -167,14 +175,14 @@ def test_active_ban_blocks_entry_without_consuming_invite(db_session, create_use
     target = create_user()
     membership = _member(db_session, server, target)
     db_session.commit()
-    invite, token = create_server_invite(
+    invite = create_server_invite(
         db_session, server.id, owner["id"], max_uses=3
     )
     ban_server_member(db_session, server.id, target["id"], owner["id"])
 
     _assert_http_error(
         lambda: accept_server_invite(
-            db_session, server.id, token, target["id"]
+            db_session, server.id, invite.token, target["id"]
         ),
         403,
     )
@@ -194,13 +202,13 @@ def test_entry_is_allowed_after_unban_without_restoring_roles(
         db_session, server, target, joined_at=old_joined_at
     )
     db_session.commit()
-    invite, token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
     ban = ban_server_member(db_session, server.id, target["id"], owner["id"])
     unban_server_member(db_session, server.id, ban.id, owner["id"])
 
-    rejoined = accept_server_invite(db_session, server.id, token, target["id"])
+    rejoined = accept_server_invite(db_session, server.id, invite.token, target["id"])
 
-    assert rejoined.id == membership.id
+    assert _membership_id(db_session, rejoined) == membership.id
     assert rejoined.status == "ACTIVE"
     assert rejoined.left_at is None
     assert rejoined.joined_at > old_joined_at
@@ -244,9 +252,9 @@ def test_reentry_clears_residual_role_assignments_instead_of_restoring_them(
         )
     )
     db_session.flush()
-    invite, token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
 
-    rejoined = accept_server_invite(db_session, server.id, token, user["id"])
+    rejoined = accept_server_invite(db_session, server.id, invite.token, user["id"])
 
     assert rejoined.status == "ACTIVE"
     assert db_session.scalars(
@@ -336,11 +344,11 @@ def test_active_member_cannot_consume_invite_again(db_session, create_user):
     owner, server = _server(db_session, create_user)
     member_user = create_user()
     membership = _member(db_session, server, member_user)
-    invite, token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
 
     _assert_http_error(
         lambda: accept_server_invite(
-            db_session, server.id, token, member_user["id"]
+            db_session, server.id, invite.token, member_user["id"]
         ),
         409,
     )
@@ -354,7 +362,7 @@ def test_acceptance_rolls_back_member_creation_and_invite_use_on_failure(
 ):
     owner, server = _server(db_session, create_user)
     entrant = create_user()
-    invite, token = create_server_invite(
+    invite = create_server_invite(
         db_session, server.id, owner["id"], max_uses=2
     )
     db_session.commit()
@@ -368,7 +376,7 @@ def test_acceptance_rolls_back_member_creation_and_invite_use_on_failure(
     try:
         _assert_http_error(
             lambda: accept_server_invite(
-                db_session, server.id, token, entrant["id"]
+                db_session, server.id, invite.token, entrant["id"]
             ),
             500,
         )

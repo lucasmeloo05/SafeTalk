@@ -3,8 +3,10 @@ from datetime import datetime, timezone
 from threading import Barrier
 from uuid import uuid4
 
+import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -18,10 +20,13 @@ from app.models import (
 )
 from app.services.server_invite_service import (
     accept_server_invite,
+    create_server_invite,
     hash_server_invite_token,
+    revoke_server_invite,
 )
 from app.services.server_member_service import leave_server
-from app.services.server_moderation_service import ban_server_member
+from app.schemas import ServerBanResponse, ServerInviteCreatedResponse, ServerInviteMembershipResponse
+from app.services.server_moderation_service import ban_server_member, kick_server_member, unban_server_member
 from conftest import test_engine
 
 
@@ -100,6 +105,89 @@ def _run_concurrently(operation_a, operation_b):
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(run, operation_a), executor.submit(run, operation_b)]
         return [future.result(timeout=30) for future in futures]
+
+
+def _write(db, operation, context):
+    owner, target, _, _, server, _, token = context
+    if operation == "create":
+        return create_server_invite(db, server, owner, max_uses=2)
+    if operation == "accept":
+        return accept_server_invite(db, server, token, target)
+    return ban_server_member(db, server, target, owner)
+
+
+@pytest.mark.parametrize("operation", ["create", "accept", "ban"])
+def test_write_response_survives_later_transaction_without_sql(operation):
+    context = _persistent_context(target_active=operation == "ban")
+    owner, target, _, member_id, server, _, _ = context
+    try:
+        with test_engine.connect() as conn, Session(conn, expire_on_commit=True) as writer:
+            committed = False
+            post_commit_sql = []
+
+            @event.listens_for(writer, "after_commit")
+            def mark_commit(session):
+                nonlocal committed
+                committed = True
+
+            @event.listens_for(conn, "before_cursor_execute")
+            def record_sql(conn, cursor, statement, parameters, context, executemany):
+                if committed:
+                    post_commit_sql.append(statement)
+
+            response = _write(writer, operation, context)
+            assert committed
+            with Session(test_engine) as other:
+                if operation == "create":
+                    assert isinstance(response, ServerInviteCreatedResponse)
+                    revoke_server_invite(other, server, response.id, owner)
+                    assert other.get(ServerInvite, response.id).revoked_at is not None
+                    body = response.model_dump(mode="json")
+                    assert body["revoked_at"] is None
+                    assert body["token"] and "token_hash" not in body
+                elif operation == "accept":
+                    assert isinstance(response, ServerInviteMembershipResponse)
+                    kick_server_member(other, server, target, owner)
+                    assert other.get(ServerMember, member_id).status == "LEFT"
+                    body = response.model_dump(mode="json")
+                    assert body["status"] == "ACTIVE" and body["left_at"] is None
+                else:
+                    assert isinstance(response, ServerBanResponse)
+                    unban_server_member(other, server, response.id, owner)
+                    assert other.get(ServerBan, response.id).is_active is False
+                    body = response.model_dump(mode="json")
+                    assert body["is_active"] is True
+                    assert body["revoked_at"] is None and body["revoked_by"] is None
+            assert post_commit_sql == []
+    finally:
+        _cleanup(context)
+
+
+@pytest.mark.parametrize("operation", ["create", "accept", "ban"])
+def test_failed_commit_returns_error_and_rolls_back(operation):
+    context = _persistent_context(target_active=operation == "ban")
+    _, _, _, member_id, server, invite_id, _ = context
+    try:
+        with Session(test_engine, expire_on_commit=True) as writer:
+            @event.listens_for(writer, "before_commit")
+            def fail_commit(session):
+                raise SQLAlchemyError("Falha de commit simulada")
+
+            with pytest.raises(HTTPException) as failure:
+                _write(writer, operation, context)
+            assert failure.value.status_code == 500
+            assert not writer.in_transaction()
+
+        with Session(test_engine) as reader:
+            invites = reader.scalars(select(ServerInvite).where(ServerInvite.server_id == server)).all()
+            assert [(item.id, item.uses_count) for item in invites] == [(invite_id, 0)]
+            member = reader.get(ServerMember, member_id)
+            assert member.status == ("ACTIVE" if operation == "ban" else "LEFT")
+            assert (member.left_at is None) == (operation == "ban")
+            assert reader.scalar(select(ServerBan.id).where(ServerBan.server_id == server)) is None
+            assert reader.scalar(select(ServerAuditLog.id).where(ServerAuditLog.server_id == server)) is None
+    finally:
+        _cleanup(context)
 
 
 def test_concurrent_acceptance_consumes_limited_invite_once():

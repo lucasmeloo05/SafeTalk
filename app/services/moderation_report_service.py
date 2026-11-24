@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models import (
+    Conversation,
     ConversationParticipant,
     Message,
     ModerationAnalysisJob,
@@ -33,6 +34,44 @@ def _is_duplicate_report(error: IntegrityError) -> bool:
     )
 
 
+def stage_message_report(db: Session, message: Message, actor_id: int, reason: str,
+                         *, server_id: int | None = None, channel_id: int | None = None) -> ModerationReport:
+    if message.sender_id == actor_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Você não pode denunciar a própria mensagem.",
+        )
+
+    report = ModerationReport(
+        reporter_id=actor_id,
+        message_id=message.id,
+        reason=reason,
+    )
+    db.add(report)
+    db.flush()
+    db.refresh(report)
+
+    evidence = ModerationReportEvidence(
+        report_id=report.id,
+        channel_id=channel_id, server_id=server_id,
+        message_id=message.id,
+        message_author_id=message.sender_id,
+        content_snapshot=message.content,
+        message_created_at=message.created_at,
+        message_updated_at=message.updated_at,
+        message_edited_at=message.edited_at,
+    )
+    db.add(evidence)
+    db.flush()
+
+    # Durable outbox row is committed atomically with the report/evidence.
+    # It remains in PENDING_TRIAGE until an official moderator explicitly
+    # approves sending this single snapshot to the external provider.
+    db.add(ModerationAnalysisJob(report_id=report.id))
+
+    return report
+
+
 def create_message_report(
     db: Session,
     current_user: User,
@@ -47,6 +86,8 @@ def create_message_report(
     try:
         message = db.scalar(
             select(Message)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(Conversation.type != "CHANNEL")
             .join(
                 ConversationParticipant,
                 ConversationParticipant.conversation_id
@@ -64,38 +105,7 @@ def create_message_report(
                 detail="Mensagem não encontrada.",
             )
 
-        if message.sender_id == current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Você não pode denunciar a própria mensagem.",
-            )
-
-        report = ModerationReport(
-            reporter_id=current_user.id,
-            message_id=message.id,
-            reason=reason,
-        )
-        db.add(report)
-        db.flush()
-        db.refresh(report)
-
-        evidence = ModerationReportEvidence(
-            report_id=report.id,
-            message_id=message.id,
-            message_author_id=message.sender_id,
-            content_snapshot=message.content,
-            message_created_at=message.created_at,
-            message_updated_at=message.updated_at,
-            message_edited_at=message.edited_at,
-        )
-        db.add(evidence)
-        db.flush()
-
-        # Durable outbox row is committed atomically with the report/evidence.
-        # It remains in PENDING_TRIAGE until an official moderator explicitly
-        # approves sending this single snapshot to the external provider.
-        db.add(ModerationAnalysisJob(report_id=report.id))
-
+        report = stage_message_report(db, message, current_user.id, reason)
         db.commit()
         return report
 

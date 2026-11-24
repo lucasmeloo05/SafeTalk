@@ -8,8 +8,9 @@ import {
   type ReactNode,
 } from "react";
 import { ApiError, AUTH_UNAUTHORIZED_EVENT } from "@/lib/api";
-import { getTokenExpirationMs, tokenStorage } from "@/lib/token-storage";
+import { getTokenExpirationMs, tokenStorage, TOKEN_UPDATED_EVENT } from "@/lib/token-storage";
 import {
+  completeTwoFactor,
   getCurrentUser,
   loginUser,
   registerUser,
@@ -21,7 +22,8 @@ type AuthContextValue = {
   user: UserResponse | null;
   isLoading: boolean;
   sessionNotice: string | null;
-  signIn: (login: string, password: string) => Promise<void>;
+  signIn: (login: string, password: string) => Promise<string | void>;
+  verifySecondFactor: (challenge: string, code: string, recovery: boolean) => Promise<void>;
   signUp: (payload: UserCreatePayload) => Promise<UserResponse>;
   signOut: () => void;
 };
@@ -31,12 +33,19 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [tokenRevision, setTokenRevision] = useState(0);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
 
   const signOut = useCallback(() => {
     tokenStorage.clear();
     setUser(null);
     setSessionNotice(null);
+  }, []);
+
+  useEffect(() => {
+    const renewed = () => setTokenRevision(value => value + 1);
+    window.addEventListener(TOKEN_UPDATED_EVENT, renewed);
+    return () => window.removeEventListener(TOKEN_UPDATED_EVENT, renewed);
   }, []);
 
   useEffect(() => {
@@ -115,10 +124,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSessionNotice("Sua sessão expirou. Entre novamente.");
     }, Math.max(0, expiresAt - Date.now()));
     return () => window.clearTimeout(timeout);
-  }, [user]);
+  }, [user, tokenRevision]);
 
-  const signIn = useCallback(async (login: string, password: string) => {
-    const token = await loginUser({ login, password });
+  const finishLogin = useCallback(async (token: { access_token: string; token_type: string }) => {
     if (!token.access_token || token.token_type.toLowerCase() !== "bearer") {
       throw new ApiError("A API retornou uma resposta de autenticação inválida.");
     }
@@ -139,13 +147,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const signIn = useCallback(async (login: string, password: string) => {
+    const result = await loginUser({ login, password });
+    if ("two_factor_required" in result) return result.challenge;
+    await finishLogin(result);
+  }, [finishLogin]);
+
+  const verifySecondFactor = useCallback(async (challenge: string, code: string, recovery: boolean) => {
+    await finishLogin(await completeTwoFactor(challenge, code, recovery));
+  }, [finishLogin]);
+
   const signUp = useCallback((payload: UserCreatePayload) => {
     return registerUser(payload);
   }, []);
 
   const value = useMemo(
-    () => ({ user, isLoading, sessionNotice, signIn, signUp, signOut }),
-    [user, isLoading, sessionNotice, signIn, signUp, signOut],
+    () => ({ user, isLoading, sessionNotice, signIn, verifySecondFactor, signUp, signOut }),
+    [user, isLoading, sessionNotice, signIn, verifySecondFactor, signUp, signOut],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

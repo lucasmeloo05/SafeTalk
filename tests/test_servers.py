@@ -161,6 +161,26 @@ def test_existing_server_without_membership_returns_not_found_for_consultation(
     assert response.json() == {"detail": "Servidor não encontrado."}
 
 
+def test_discoverable_server_remains_hidden_from_external_users(
+    client: TestClient, db_session, create_user, auth_headers,
+):
+    owner, outsider = create_user(), create_user()
+    server = _create_server(client, auth_headers(owner)).json()
+    db_session.execute(
+        Server.__table__.update()
+        .where(Server.id == server["id"])
+        .values(is_discoverable=True)
+    )
+    db_session.flush()
+
+    assert client.get("/servers/", headers=auth_headers(outsider)).json() == []
+    detail = client.get(
+        f"/servers/{server['id']}", headers=auth_headers(outsider)
+    )
+    assert detail.status_code == 404
+    assert detail.json() == {"detail": "Servidor não encontrado."}
+
+
 def test_left_member_cannot_consult_or_update_server(
     client: TestClient,
     db_session,
@@ -301,6 +321,31 @@ def test_update_rejects_owner_id_and_does_not_change_owner(
     assert current.status_code == 200
     assert current.json()["owner_id"] == owner["id"]
     assert current.json()["name"] == "Comunidade"
+
+
+def test_server_create_and_update_reject_is_discoverable(
+    client: TestClient, create_user, auth_headers,
+):
+    owner = create_user()
+    headers = auth_headers(owner)
+
+    create_response = client.post(
+        "/servers/",
+        json={"name": "Privado", "is_discoverable": True},
+        headers=headers,
+    )
+    assert create_response.status_code == 422
+
+    server = _create_server(client, headers).json()
+    update_response = client.patch(
+        f"/servers/{server['id']}",
+        json={"is_discoverable": True},
+        headers=headers,
+    )
+    assert update_response.status_code == 422
+    current = client.get(f"/servers/{server['id']}", headers=headers)
+    assert current.status_code == 200
+    assert "is_discoverable" not in current.json()
 
 
 def test_create_server_rolls_back_if_membership_creation_fails(

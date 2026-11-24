@@ -33,12 +33,17 @@ export async function registerUser(
   return response.data;
 }
 
-export async function loginUser(payload: LoginPayload): Promise<TokenResponse> {
-  const response = await api.post<TokenResponse>("/users/login", payload);
+export async function loginUser(payload: LoginPayload): Promise<TokenResponse | { two_factor_required: true; challenge: string; expires_in: number }> {
+  const response = await api.post<TokenResponse | { two_factor_required: true; challenge: string; expires_in: number }>("/users/login", payload);
   return response.data;
 }
 
 export async function getCurrentUser(): Promise<UserResponse> {
   const response = await api.get<UserResponse>("/users/me");
   return response.data;
+}
+
+
+export async function completeTwoFactor(challenge: string, code: string, recovery: boolean) {
+  return (await api.post<TokenResponse>("/users/login/2fa", { challenge, code, recovery })).data;
 }

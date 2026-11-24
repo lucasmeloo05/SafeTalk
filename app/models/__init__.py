@@ -9,7 +9,7 @@ from app.models.server import Server
 from app.models.server_member import ServerMember
 from app.models.server_role import ServerRole
 from app.models.server_member_role import ServerMemberRole
-from app.models.server_channel import ServerChannel
+from app.models.server_channel import ServerChannel, ServerChannelRole
 from app.models.server_invite import ServerInvite
 from app.models.server_config_history import ServerConfigHistory
 from app.models.server_ban import ServerBan
@@ -19,6 +19,11 @@ from app.models.moderation_report import ModerationReport
 from app.models.moderation_report_evidence import ModerationReportEvidence
 from app.models.moderation_action import ModerationAction
 from app.models.moderation_analysis_job import ModerationAnalysisJob
+from app.models.moderation_sanction import (
+    ModerationSanction,
+    ModerationSanctionBasis,
+    ModerationSanctionReview,
+)
 
 from app.models.conversation import Conversation
 from app.models.conversation_participant import ConversationParticipant
@@ -41,6 +46,7 @@ __all__ = [
     "ServerRole",
     "ServerMemberRole",
     "ServerChannel",
+    "ServerChannelRole",
     "ServerInvite",
     "ServerConfigHistory",
     "ServerBan",
@@ -49,6 +55,9 @@ __all__ = [
     "ModerationReportEvidence",
     "ModerationAction",
     "ModerationAnalysisJob",
+    "ModerationSanction",
+    "ModerationSanctionBasis",
+    "ModerationSanctionReview",
     "Conversation",
     "ConversationParticipant",
     "ConversationInvitation",
@@ -57,3 +66,5 @@ __all__ = [
     "MessageUpdateEvent",
     "MessageEditHistory",
 ]
+
+from app.models.two_factor import TwoFactor, TwoFactorChallenge, TwoFactorAudit

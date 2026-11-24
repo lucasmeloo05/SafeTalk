@@ -19,7 +19,7 @@ from app.database import Base
 
 
 class ServerAuditLog(Base):
-    """Immutable moderation event; snapshots are historical only."""
+    """Immutable server audit event; snapshots are historical only."""
 
     __tablename__ = "server_audit_logs"
 
@@ -27,7 +27,8 @@ class ServerAuditLog(Base):
         PrimaryKeyConstraint("id", name="pk_server_audit_logs"),
         CheckConstraint(
             "event_type IN "
-            "('MEMBER_KICKED', 'MEMBER_BANNED', 'MEMBER_UNBANNED')",
+            "('MEMBER_KICKED', 'MEMBER_BANNED', 'MEMBER_UNBANNED', "
+            "'OWNERSHIP_TRANSFERRED', 'CHANNEL_ROLE_ACCESS_GRANTED', 'CHANNEL_ROLE_ACCESS_REVOKED', 'CHANNEL_BECAME_PRIVATE', 'CHANNEL_BECAME_PUBLIC')",
             name="ck_server_audit_logs_valid_event_type",
         ),
         CheckConstraint(
@@ -35,6 +36,13 @@ class ServerAuditLog(Base):
             name="ck_server_audit_logs_actor_differs_from_target",
         ),
         CheckConstraint(
+            "(target_user_id IS NULL AND channel_id IS NOT NULL AND ban_id IS NULL "
+            "AND role_snapshot IS NULL AND ("
+            "(event_type IN ('CHANNEL_ROLE_ACCESS_GRANTED', 'CHANNEL_ROLE_ACCESS_REVOKED') "
+            "AND role_id IS NOT NULL) OR "
+            "(event_type IN ('CHANNEL_BECAME_PRIVATE', 'CHANNEL_BECAME_PUBLIC') "
+            "AND role_id IS NULL))) OR "
+            "(target_user_id IS NOT NULL AND channel_id IS NULL AND role_id IS NULL AND ("
             "(event_type = 'MEMBER_KICKED' AND ban_id IS NULL "
             "AND role_snapshot IS NOT NULL "
             "AND jsonb_typeof(role_snapshot) = 'array') OR "
@@ -43,7 +51,10 @@ class ServerAuditLog(Base):
             "AND jsonb_typeof(role_snapshot) = 'array') OR "
             "(event_type = 'MEMBER_UNBANNED' AND ban_id IS NOT NULL "
             "AND (role_snapshot IS NULL "
-            "OR role_snapshot = 'null'::jsonb))",
+            "OR role_snapshot = 'null'::jsonb)) OR "
+            "(event_type = 'OWNERSHIP_TRANSFERRED' AND ban_id IS NULL "
+            "AND (role_snapshot IS NULL "
+            "OR role_snapshot = 'null'::jsonb))))",
             name="ck_server_audit_logs_event_ban_snapshot_consistency",
         ),
         ForeignKeyConstraint(
@@ -88,11 +99,13 @@ class ServerAuditLog(Base):
         nullable=False,
     )
 
-    target_user_id: Mapped[int] = mapped_column(
+    channel_id: Mapped[int | None] = mapped_column(Integer)
+    role_id: Mapped[int | None] = mapped_column(Integer)
+    target_user_id: Mapped[int | None] = mapped_column(
         ForeignKey(
             "users.id", name="fk_server_audit_logs_target_user_id_users"
         ),
-        nullable=False,
+        nullable=True,
     )
 
     occurred_at: Mapped[datetime] = mapped_column(

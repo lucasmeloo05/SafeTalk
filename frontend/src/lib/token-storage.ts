@@ -1,4 +1,5 @@
 const TOKEN_KEY = "safetalk.access_token";
+export const TOKEN_UPDATED_EVENT = "safetalk:token-updated";
 
 /**
  * Decodifica apenas o campo exp para agendar o encerramento visual da sessão.
@@ -23,7 +24,9 @@ export const tokenStorage = {
     return window.sessionStorage.getItem(TOKEN_KEY);
   },
   set(token: string): void {
+    const previous = window.sessionStorage.getItem(TOKEN_KEY);
     window.sessionStorage.setItem(TOKEN_KEY, token);
+    if (previous && previous !== token) window.dispatchEvent(new Event(TOKEN_UPDATED_EVENT));
   },
   clear(): void {
     window.sessionStorage.removeItem(TOKEN_KEY);

@@ -302,7 +302,7 @@ def test_human_decision_before_claim_cancels_approved_job(db_session, create_use
         db_session,
         report_id=report.id,
         staff=staff,
-        decision="CLOSED",
+        decision="NO_VIOLATION",
         reason="Decisão humana final antes do processamento.",
     )
     client = FakeClient(response=_provider_response(flagged=True))
@@ -336,7 +336,7 @@ def test_human_decision_during_analysis_is_not_overwritten(db_session, create_us
             db_session,
             report_id=report.id,
             staff=staff,
-            decision="CLOSED",
+            decision="NO_VIOLATION",
             reason="Decisão humana durante a análise.",
         )
         return _provider_response(flagged=True)

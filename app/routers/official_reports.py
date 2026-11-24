@@ -20,9 +20,12 @@ from app.services.moderation_review_service import (
     record_human_decision,
     triage_report_for_external_analysis,
 )
+from app.services.moderation_sanction_service import list_platform_sanctions
 
 
-router = APIRouter(prefix="/official/reports", tags=["Moderação oficial"])
+from app.server_age_dependency import require_report_age
+
+router = APIRouter(prefix="/official/reports", tags=["Moderação oficial"], dependencies=[Depends(require_report_age)])
 
 
 @router.get("", response_model=ModerationReportPage)
@@ -35,7 +38,7 @@ def list_reports_route(
     # Both approved official roles can review reports; the current product rules
     # do not define different capabilities for ADMIN versus MODERATOR.
     _ = staff
-    return list_official_reports(db, page=page, page_size=page_size)
+    return list_official_reports(db, page=page, page_size=page_size, viewer_user_id=staff.user_id)
 
 
 @router.get("/{report_id}", response_model=ModerationReportDetailResponse)
@@ -103,4 +106,7 @@ def record_decision_route(
         "decision": action.action_type,
         "reason": action.reason,
         "created_at": action.created_at,
+        "sanctions": list_platform_sanctions(
+            db, page=1, page_size=100, report_id=report_id
+        )["items"],
     }

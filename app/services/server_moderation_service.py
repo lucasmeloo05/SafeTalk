@@ -13,6 +13,7 @@ from app.models import (
     ServerMemberRole,
     ServerRole,
 )
+from app.schemas import ServerBanResponse
 from app.services.server_authorization_service import (
     get_member_hierarchy_level,
     has_server_permission,
@@ -290,7 +291,7 @@ def ban_server_member(
     target_user_id: int,
     actor_user_id: int,
     reason: str | None = None,
-) -> ServerBan:
+) -> ServerBanResponse:
     """Ban an active member, snapshotting roles and auditing atomically."""
     try:
         server = _lock_server(db, server_id)
@@ -354,8 +355,9 @@ def ban_server_member(
             )
         )
         db.flush()
+        response = ServerBanResponse.model_validate(ban)
         db.commit()
-        return ban
+        return response
     except Exception as exc:
         _translate_moderation_error(
             db,

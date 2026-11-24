@@ -10,12 +10,28 @@ import {
   getOfficialAnalysis,
   getOfficialReport,
   listOfficialReports,
+  listOfficialSanctions,
+  reviewOfficialSanction,
   submitOfficialDecision,
   submitOfficialTriage,
 } from '@/services/official-moderation-api';
 
 describe('serviços da API oficial de moderação', () => {
   beforeEach(() => vi.resetAllMocks());
+
+  it('consulta sanções por autor e envia a revisão pelo ID da sanção', async () => {
+    const signal = new AbortController().signal;
+    apiMock.get.mockResolvedValue({ data: { items: [], total: 0 } });
+    await listOfficialSanctions(61, 2, signal);
+    expect(apiMock.get).toHaveBeenCalledWith('/official/sanctions', {
+      params: { target_user_id: 61, page: 2, page_size: 10 }, signal,
+    });
+    apiMock.post.mockResolvedValue({ data: {} });
+    await reviewOfficialSanction(81, 'UPHOLD', 'Revisão concluída.');
+    expect(apiMock.post).toHaveBeenCalledWith('/official/sanctions/81/review', {
+      decision: 'UPHOLD', reason: 'Revisão concluída.',
+    });
+  });
 
   it('lista denúncias com paginação page/page_size', async () => {
     const page = { items: [], page: 2, page_size: 20, total: 21 };
@@ -51,8 +67,8 @@ describe('serviços da API oficial de moderação', () => {
     expect(apiMock.post).toHaveBeenCalledWith('/official/reports/76/triage', payload);
   });
 
-  it('envia decisão humana livre e justificativa sem inferir punição', async () => {
-    const payload = { decision: 'Revisada', reason: 'A evidência foi analisada pela equipe.' };
+  it('envia código fechado de decisão humana e justificativa', async () => {
+    const payload = { decision: 'WARNING' as const, reason: 'A evidência foi analisada pela equipe.' };
     const result = { id: 5, report_id: 76, actor_user_id: 3, ...payload, created_at: '2026-11-16T10:00:00Z' };
     apiMock.post.mockResolvedValue({ data: result });
 

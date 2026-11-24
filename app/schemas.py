@@ -12,11 +12,12 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    SecretStr,
     field_validator,
     model_validator,
 )
 
-from app.server_permissions import ServerPermissionKey
+from app.server_permissions import SERVER_PERMISSION_KEYS, ServerPermissionKey
 
 
 class UserCreate(BaseModel):
@@ -37,15 +38,8 @@ class UserCreate(BaseModel):
     @field_validator("birth_date")
     @classmethod
     def validate_birth_date(cls, value: date) -> date:
-        today = date.today()
-
-        if value > today:
-            raise ValueError("A data de nascimento não pode ser futura.")
-
-        if value.year < 1900:
-            raise ValueError("A data de nascimento é inválida.")
-
-        return value
+        from app.age_policy import validate_birth_date
+        return validate_birth_date(value)
 
 
 class UserResponse(BaseModel):
@@ -286,6 +280,8 @@ class ModerationReportPage(BaseModel):
 
 
 class ModerationReportEvidenceResponse(BaseModel):
+    server_id: int | None = None
+    channel_id: int | None = None
     message_id: int
     message_author_id: int
     content_snapshot: str
@@ -301,6 +297,7 @@ class ModerationActionResponse(BaseModel):
     id: int
     actor_user_id: int
     action_type: str
+    decision_code: str | None = None
     reason: str | None
     created_at: datetime
 
@@ -345,12 +342,18 @@ class ModerationReportTriage(BaseModel):
 
 
 class ModerationHumanDecision(BaseModel):
-    decision: str = Field(min_length=1, max_length=50)
+    decision: Literal[
+        "NO_VIOLATION",
+        "REVIEWED_MANUALLY",
+        "WARNING",
+        "TEMPORARY_SUSPENSION",
+        "PERMANENT_BAN",
+    ]
     reason: str = Field(min_length=1, max_length=1000)
 
     model_config = ConfigDict(extra="forbid")
 
-    @field_validator("decision", "reason")
+    @field_validator("reason")
     @classmethod
     def normalize_text(cls, value: str) -> str:
         value = value.strip()
@@ -359,7 +362,64 @@ class ModerationHumanDecision(BaseModel):
         return value
 
 
+class ModerationSanctionResponse(BaseModel):
+    id: int
+    report_id: int
+    target_user_id: int
+    actor_user_id: int
+    sanction_type: Literal["WARNING", "TEMPORARY_SUSPENSION", "PERMANENT_BAN"]
+    reason: str
+    issued_at: datetime
+    expires_at: datetime | None
+    reversed_at: datetime | None
+    reversed_by: int | None
+    reversal_reason: str | None
+    requires_review: bool
+    basis_warning_ids: list[int] = Field(default_factory=list)
+    review_history: list["ModerationSanctionReviewResponse"] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ModerationSanctionReviewResponse(BaseModel):
+    id: int
+    actor_user_id: int
+    review_type: Literal["REVIEW_REQUIRED", "UPHELD", "REVERSED"]
+    reason: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ModerationSanctionPage(BaseModel):
+    items: list[ModerationSanctionResponse]
+    page: int
+    page_size: int
+    total: int
+
+
+class ModerationSanctionReview(BaseModel):
+    decision: Literal["UPHOLD", "REVERSE"]
+    reason: str = Field(min_length=1, max_length=1000)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("A justificativa não pode estar vazia.")
+        return value
+
+
+class AccountRestrictionResponse(BaseModel):
+    sanction_type: Literal["TEMPORARY_SUSPENSION", "PERMANENT_BAN"]
+    expires_at: datetime | None
+
+
 class ServerCreate(BaseModel):
+    is_adult: StrictBool = False
     name: str = Field(min_length=1, max_length=100)
     description: str | None = None
 
@@ -375,6 +435,7 @@ class ServerCreate(BaseModel):
 
 
 class ServerUpdate(BaseModel):
+    ai_moderation_enabled: StrictBool | None = None
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = None
 
@@ -392,6 +453,8 @@ class ServerUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_update_fields(self):
+        if "ai_moderation_enabled" in self.model_fields_set and self.ai_moderation_enabled is None:
+            raise ValueError("Informe um booleano para a análise por IA.")
         if not self.model_fields_set:
             raise ValueError("Informe ao menos um campo para atualização.")
         if "name" in self.model_fields_set and self.name is None:
@@ -411,20 +474,57 @@ class ServerEveryonePermissionsResponse(BaseModel):
 
 
 class ServerResponse(BaseModel):
+    is_adult: bool = False
     id: int
     owner_id: int
     name: str
     description: str | None
     created_at: datetime
     updated_at: datetime
+    everyone_permissions: dict[ServerPermissionKey, StrictBool] = Field(
+        default_factory=dict
+    )
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("everyone_permissions", mode="before")
+    @classmethod
+    def expose_only_known_everyone_permissions(cls, value: object) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            key: granted
+            for key, granted in value.items()
+            if key in SERVER_PERMISSION_KEYS and type(granted) is bool
+        }
+
+
+class ServerOwnershipTransfer(BaseModel):
+    new_owner_id: StrictInt = Field(gt=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ServerMemberRoleSummary(BaseModel):
+    id: int
+    name: str
+    position: int
 
 
 class ServerMemberResponse(BaseModel):
     user_id: int
     username: str
     joined_at: datetime
+    roles: list[ServerMemberRoleSummary] = Field(default_factory=list)
+
+
+class ServerAuthorizationContextResponse(BaseModel):
+    server_id: int
+    user_id: int
+    is_owner: bool
+    highest_role_position: int
+    effective_permissions: list[ServerPermissionKey]
+    has_manage_roles_permission: bool
 
 
 class ServerInviteCreate(BaseModel):
@@ -507,10 +607,19 @@ class ServerAuditLogResponse(BaseModel):
     id: int
     server_id: int
     event_type: Literal[
-        "MEMBER_KICKED", "MEMBER_BANNED", "MEMBER_UNBANNED"
+        "MEMBER_KICKED",
+        "MEMBER_BANNED",
+        "MEMBER_UNBANNED",
+        "OWNERSHIP_TRANSFERRED",
+        "CHANNEL_ROLE_ACCESS_GRANTED",
+        "CHANNEL_ROLE_ACCESS_REVOKED",
+        "CHANNEL_BECAME_PRIVATE",
+        "CHANNEL_BECAME_PUBLIC",
     ]
     actor_user_id: int
-    target_user_id: int
+    target_user_id: int | None
+    channel_id: int | None
+    role_id: int | None
     occurred_at: datetime
     reason: str | None
     ban_id: int | None
@@ -580,3 +689,14 @@ class ServerRoleUpdate(BaseModel):
         if "permissions" in self.model_fields_set and self.permissions is None:
             raise ValueError("As permissões do cargo não podem ser nulas.")
         return self
+
+class BirthDateDeclaration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    birth_date: date
+    password: SecretStr
+
+    @field_validator("birth_date")
+    @classmethod
+    def validate_date(cls, value):
+        from app.age_policy import validate_birth_date
+        return validate_birth_date(value)

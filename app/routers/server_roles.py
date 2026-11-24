@@ -1,12 +1,19 @@
+from app.server_age_dependency import require_server_age
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Response, status
+from fastapi import APIRouter, Header, Depends, Path, Response, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import User
-from app.schemas import ServerRoleCreate, ServerRoleResponse, ServerRoleUpdate
+from app.schemas import (
+    ServerAuthorizationContextResponse,
+    ServerRoleCreate,
+    ServerRoleResponse,
+    ServerRoleUpdate,
+)
+from app.services.server_authorization_service import get_server_authorization_context
 from app.services.server_role_service import (
     assign_server_role_to_member,
     create_server_role,
@@ -18,7 +25,23 @@ from app.services.server_role_service import (
 )
 
 
-router = APIRouter(prefix="/servers", tags=["Cargos de servidores"])
+router = APIRouter(prefix="/servers", tags=["Cargos de servidores"], dependencies=[Depends(require_server_age)])
+
+
+@router.get(
+    "/{server_id}/authorization-context",
+    response_model=ServerAuthorizationContextResponse,
+)
+def get_server_authorization_context_route(
+    server_id: Annotated[int, Path(gt=0)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ServerAuthorizationContextResponse:
+    return get_server_authorization_context(
+        db,
+        server_id,
+        current_user.id,
+    )
 
 
 @router.post(
@@ -76,6 +99,7 @@ def update_server_role_route(
     role_data: ServerRoleUpdate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
+    expected_permissions: Annotated[str | None, Header(alias="X-Expected-Permissions")] = None,
 ):
     return update_server_role(
         db,
@@ -83,6 +107,7 @@ def update_server_role_route(
         role_id,
         current_user.id,
         role_data,
+        expected_permissions=expected_permissions,
     )
 
 

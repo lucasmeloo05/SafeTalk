@@ -15,6 +15,7 @@ from app.models import (
     ServerMember,
     ServerMemberRole,
 )
+from app.schemas import ServerInviteCreatedResponse, ServerInviteMembershipResponse
 from app.services.server_authorization_service import (
     has_server_permission,
     resolve_server_permissions,
@@ -106,7 +107,7 @@ def create_server_invite(
     *,
     expires_at: datetime | None = None,
     max_uses: int | None = None,
-) -> tuple[ServerInvite, str]:
+) -> ServerInviteCreatedResponse:
     """Create an invite and return its raw token exactly once to the caller.
 
     ``actor_user_id`` must come from the authenticated principal. Only the
@@ -128,8 +129,18 @@ def create_server_invite(
         db.add(invite)
         db.flush()
         db.refresh(invite)
+        response = ServerInviteCreatedResponse(
+            id=invite.id,
+            server_id=invite.server_id,
+            created_at=invite.created_at,
+            expires_at=invite.expires_at,
+            max_uses=invite.max_uses,
+            uses_count=invite.uses_count,
+            revoked_at=invite.revoked_at,
+            token=token,
+        )
         db.commit()
-        return invite, token
+        return response
     except HTTPException:
         db.rollback()
         raise
@@ -222,7 +233,7 @@ def accept_server_invite(
     server_id: int,
     token: str,
     user_id: int,
-) -> ServerMember:
+) -> ServerInviteMembershipResponse:
     """Consume a valid invite and create/reactivate membership atomically.
 
     ``user_id`` must come from the authenticated principal. The lock order is
@@ -246,6 +257,8 @@ def accept_server_invite(
                 detail="Servidor não encontrado.",
             )
 
+        from app.age_policy import require_age
+        require_age(db, server_id, user_id)
         invite = db.scalar(
             select(ServerInvite)
             .where(
@@ -357,8 +370,9 @@ def accept_server_invite(
         invite.uses_count += 1
         db.flush()
         db.refresh(membership)
+        response = ServerInviteMembershipResponse.model_validate(membership)
         db.commit()
-        return membership
+        return response
     except HTTPException:
         db.rollback()
         raise

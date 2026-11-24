@@ -26,7 +26,7 @@ def lock_conversation_for_message_update(db: Session, conversation_id: int) -> C
         select(Conversation).where(Conversation.id == conversation_id)
         .with_for_update().execution_options(populate_existing=True)
     )
-    if conversation is None:
+    if conversation is None or conversation.type == "CHANNEL":
         raise HTTPException(status_code=404, detail="Conversa não encontrada.")
     return conversation
 
@@ -46,7 +46,7 @@ def lock_direct_conversation_users(db: Session, conversation_id: int) -> Convers
         .where(Conversation.id == conversation_id)
         .execution_options(populate_existing=True)
     )
-    if conversation is None:
+    if conversation is None or conversation.type == "CHANNEL":
         raise HTTPException(status_code=404, detail="Conversa não encontrada.")
 
     if conversation.type == "DIRECT":
@@ -73,7 +73,7 @@ def record_message_update_event(
     Call only while holding the conversation row lock and in the same
     transaction as the associated message mutation.
     """
-    if event_type not in {"UPDATED", "DELETED"}:
+    if event_type not in {"UPDATED", "DELETED", "CREATED"}:
         raise ValueError("Tipo de evento de mensagem inválido.")
     conversation.messages_revision += 1
     event = MessageUpdateEvent(
@@ -145,6 +145,42 @@ def check_direct_conversation_block(
         )
 
 
+def create_locked_message(db: Session, conversation: Conversation, sender_id: int, content: str) -> Message:
+    conversation_id = conversation.id
+    latest_created_at = db.scalar(
+        select(func.max(Message.created_at)).where(
+            Message.conversation_id == conversation_id
+        )
+    )
+    created_at = db.scalar(select(func.clock_timestamp()))
+    if created_at is None:
+        raise RuntimeError("Não foi possível obter o horário do banco.")
+    latest_activity_at = max(
+        timestamp
+        for timestamp in (
+            conversation.created_at,
+            conversation.updated_at,
+            latest_created_at,
+        )
+        if timestamp is not None
+    )
+    if created_at <= latest_activity_at:
+        created_at = latest_activity_at + timedelta(microseconds=1)
+
+    message = Message(
+        conversation_id=conversation_id,
+        sender_id=sender_id,
+        content=content,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    db.add(message)
+    db.flush()
+
+    conversation.updated_at = message.created_at
+    return message
+
+
 def send_message(
     db: Session,
     current_user: User,
@@ -159,40 +195,8 @@ def send_message(
         get_active_participant(db, conversation_id, current_user.id)
         check_direct_conversation_block(db, conversation, current_user.id)
 
-        latest_created_at = db.scalar(
-            select(func.max(Message.created_at)).where(
-                Message.conversation_id == conversation_id
-            )
-        )
-        created_at = db.scalar(select(func.clock_timestamp()))
-        if created_at is None:
-            raise RuntimeError("Não foi possível obter o horário do banco.")
-        latest_activity_at = max(
-            timestamp
-            for timestamp in (
-                conversation.created_at,
-                conversation.updated_at,
-                latest_created_at,
-            )
-            if timestamp is not None
-        )
-        if created_at <= latest_activity_at:
-            created_at = latest_activity_at + timedelta(microseconds=1)
-
-        message = Message(
-            conversation_id=conversation_id,
-            sender_id=current_user.id,
-            content=content,
-            created_at=created_at,
-            updated_at=created_at,
-        )
-        db.add(message)
-        db.flush()
-
-        conversation.updated_at = message.created_at
-
+        message = create_locked_message(db, conversation, current_user.id, content)
         db.commit()
-
     except Exception:
         db.rollback()
         raise
@@ -201,7 +205,92 @@ def send_message(
     # finish before this read; serialize the row's refreshed persisted state so
     # this POST cannot return deleted content as an active message.
     db.refresh(message)
-    return _message_response_data(message)
+    return message_response_data(message)
+
+
+def edit_locked_message(db: Session, conversation: Conversation, actor_id: int, message_id: int, normalized_content: str) -> dict:
+    conversation_id = conversation.id
+    message = db.scalar(
+        select(Message)
+        .where(
+            Message.id == message_id,
+            Message.conversation_id == conversation_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if message is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Mensagem não encontrada nesta conversa.",
+        )
+    if message.sender_id != actor_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Somente o autor pode editar esta mensagem.",
+        )
+    if message.deleted_for_everyone_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Mensagens apagadas para todos não podem ser editadas.",
+        )
+
+    database_now = db.scalar(select(func.clock_timestamp()))
+    if database_now is None:
+        raise RuntimeError("Não foi possível obter o horário do banco.")
+    if database_now > message.created_at + timedelta(minutes=15):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="O prazo de 15 minutos para editar esta mensagem expirou.",
+        )
+
+    if normalized_content == message.content:
+        current_message_revision = db.scalar(
+            select(func.max(MessageUpdateEvent.revision)).where(
+                MessageUpdateEvent.conversation_id == conversation_id,
+                MessageUpdateEvent.message_id == message_id,
+            )
+        ) or 0
+        result = {
+            "message": message_response_data(message),
+            "message_state_revision": current_message_revision,
+        }
+        return result
+
+    previous_content = message.content
+    edited_at = database_now
+    expected_revision = conversation.messages_revision + 1
+
+    # Add the immutable version before mutating the current row. Its
+    # deferred FK is checked at commit after the update event is inserted.
+    db.add(
+        MessageEditHistory(
+            message_id=message.id,
+            conversation_id=conversation.id,
+            previous_content=previous_content,
+            new_content=normalized_content,
+            edited_by_id=actor_id,
+            edited_at=edited_at,
+            message_state_revision=expected_revision,
+        )
+    )
+    message.content = normalized_content
+    message.updated_at = edited_at
+    message.edited_at = edited_at
+    conversation.updated_at = edited_at
+
+    revision = record_message_update_event(db, conversation, message, "UPDATED")
+    if revision != expected_revision:
+        raise RuntimeError("A revisão da edição divergiu do evento registrado.")
+
+    # Build the response while the transaction is still open. Once commit
+    # succeeds, no refresh or other fallible database operation should turn
+    # a persisted edit into an apparent request failure.
+    result = {
+        "message": message_response_data(message),
+        "message_state_revision": revision,
+    }
+    return result
 
 
 def edit_message(
@@ -228,92 +317,62 @@ def edit_message(
         get_active_participant(db, conversation_id, current_user.id)
         check_direct_conversation_block(db, conversation, current_user.id)
 
-        message = db.scalar(
-            select(Message)
-            .where(
-                Message.id == message_id,
-                Message.conversation_id == conversation_id,
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        if message is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Mensagem não encontrada nesta conversa.",
-            )
-        if message.sender_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Somente o autor pode editar esta mensagem.",
-            )
-        if message.deleted_for_everyone_at is not None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Mensagens apagadas para todos não podem ser editadas.",
-            )
-
-        database_now = db.scalar(select(func.clock_timestamp()))
-        if database_now is None:
-            raise RuntimeError("Não foi possível obter o horário do banco.")
-        if database_now > message.created_at + timedelta(minutes=15):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="O prazo de 15 minutos para editar esta mensagem expirou.",
-            )
-
-        if normalized_content == message.content:
-            current_message_revision = db.scalar(
-                select(func.max(MessageUpdateEvent.revision)).where(
-                    MessageUpdateEvent.conversation_id == conversation_id,
-                    MessageUpdateEvent.message_id == message_id,
-                )
-            ) or 0
-            result = {
-                "message": _message_response_data(message),
-                "message_state_revision": current_message_revision,
-            }
-            db.commit()
-            return result
-
-        previous_content = message.content
-        edited_at = database_now
-        expected_revision = conversation.messages_revision + 1
-
-        # Add the immutable version before mutating the current row. Its
-        # deferred FK is checked at commit after the update event is inserted.
-        db.add(
-            MessageEditHistory(
-                message_id=message.id,
-                conversation_id=conversation.id,
-                previous_content=previous_content,
-                new_content=normalized_content,
-                edited_by_id=current_user.id,
-                edited_at=edited_at,
-                message_state_revision=expected_revision,
-            )
-        )
-        message.content = normalized_content
-        message.updated_at = edited_at
-        message.edited_at = edited_at
-        conversation.updated_at = edited_at
-
-        revision = record_message_update_event(db, conversation, message, "UPDATED")
-        if revision != expected_revision:
-            raise RuntimeError("A revisão da edição divergiu do evento registrado.")
-
-        # Build the response while the transaction is still open. Once commit
-        # succeeds, no refresh or other fallible database operation should turn
-        # a persisted edit into an apparent request failure.
-        result = {
-            "message": _message_response_data(message),
-            "message_state_revision": revision,
-        }
+        result = edit_locked_message(db, conversation, current_user.id, message_id, normalized_content)
         db.commit()
         return result
     except Exception:
         db.rollback()
         raise
+
+
+def delete_locked_message(db: Session, conversation: Conversation, actor_id: int, message_id: int) -> dict:
+    conversation_id = conversation.id
+    message = db.scalar(
+        select(Message)
+        .where(
+            Message.id == message_id,
+            Message.conversation_id == conversation_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if message is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Mensagem não encontrada nesta conversa.",
+        )
+    if message.sender_id != actor_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Somente o autor pode excluir esta mensagem.",
+        )
+    if message.deleted_for_everyone_at is not None:
+        revision = db.scalar(
+            select(func.max(MessageUpdateEvent.revision)).where(
+                MessageUpdateEvent.conversation_id == conversation_id,
+                MessageUpdateEvent.message_id == message_id,
+            )
+        ) or 0
+        result = {
+            "message": message_response_data(message),
+            "message_state_revision": revision,
+        }
+        return result
+
+    deleted_at = db.scalar(select(func.clock_timestamp()))
+    if deleted_at is None:
+        raise RuntimeError("Não foi possível obter o horário do banco.")
+    message.deleted_for_everyone_at = deleted_at
+    message.deleted_for_everyone_by_id = actor_id
+    message.updated_at = deleted_at
+    conversation.updated_at = deleted_at
+
+    revision = record_message_update_event(db, conversation, message, "DELETED")
+    result = {
+        "message": message_response_data(message),
+        "message_state_revision": revision,
+    }
+    return result
 
 
 def delete_message_for_everyone(
@@ -332,52 +391,7 @@ def delete_message_for_everyone(
         get_active_participant(db, conversation_id, current_user.id)
         check_direct_conversation_block(db, conversation, current_user.id)
 
-        message = db.scalar(
-            select(Message)
-            .where(
-                Message.id == message_id,
-                Message.conversation_id == conversation_id,
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        if message is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Mensagem não encontrada nesta conversa.",
-            )
-        if message.sender_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Somente o autor pode excluir esta mensagem.",
-            )
-        if message.deleted_for_everyone_at is not None:
-            revision = db.scalar(
-                select(func.max(MessageUpdateEvent.revision)).where(
-                    MessageUpdateEvent.conversation_id == conversation_id,
-                    MessageUpdateEvent.message_id == message_id,
-                )
-            ) or 0
-            result = {
-                "message": _message_response_data(message),
-                "message_state_revision": revision,
-            }
-            db.commit()
-            return result
-
-        deleted_at = db.scalar(select(func.clock_timestamp()))
-        if deleted_at is None:
-            raise RuntimeError("Não foi possível obter o horário do banco.")
-        message.deleted_for_everyone_at = deleted_at
-        message.deleted_for_everyone_by_id = current_user.id
-        message.updated_at = deleted_at
-        conversation.updated_at = deleted_at
-
-        revision = record_message_update_event(db, conversation, message, "DELETED")
-        result = {
-            "message": _message_response_data(message),
-            "message_state_revision": revision,
-        }
+        result = delete_locked_message(db, conversation, current_user.id, message_id)
         db.commit()
         return result
     except Exception:
@@ -385,7 +399,7 @@ def delete_message_for_everyone(
         raise
 
 
-def _message_response_data(message: Message) -> dict[str, Any]:
+def message_response_data(message: Message) -> dict[str, Any]:
     return {
         "id": message.id,
         "conversation_id": message.conversation_id,
@@ -541,6 +555,10 @@ def list_message_update_events(
     get_active_participant(db, conversation_id, current_user.id)
     check_direct_conversation_block(db, conversation, current_user.id)
 
+    return read_update_events(db, conversation_id, after_revision, limit)
+
+
+def read_update_events(db: Session, conversation_id: int, after_revision: int, limit: int) -> dict:
     event = MessageUpdateEvent
     state_revisions = (
         select(

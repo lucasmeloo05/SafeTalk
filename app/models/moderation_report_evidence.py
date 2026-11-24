@@ -21,6 +21,11 @@ class ModerationReportEvidence(Base):
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_moderation_report_evidence"),
         UniqueConstraint("report_id", name="uq_moderation_report_evidence_report"),
+        UniqueConstraint(
+            "report_id",
+            "message_author_id",
+            name="uq_moderation_report_evidence_report_author",
+        ),
         ForeignKeyConstraint(
             ["report_id", "message_id"],
             ["moderation_reports.id", "moderation_reports.message_id"],
@@ -33,6 +38,9 @@ class ModerationReportEvidence(Base):
     report_id: Mapped[int] = mapped_column(Integer, nullable=False)
 
     message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    server_id: Mapped[int | None] = mapped_column(Integer)
+    channel_id: Mapped[int | None] = mapped_column(Integer)
 
     message_author_id: Mapped[int] = mapped_column(
         ForeignKey(

@@ -15,6 +15,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { MESSAGE_POLL_INTERVAL_MS } from '@/services/message-timing';
 import { ApiError } from '@/lib/api';
 import { BlockButton } from '@/components/user-blocks';
 import { useNavigate } from 'react-router-dom';
@@ -35,7 +36,7 @@ import {
 
 const PAGE_SIZE = 50;
 const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
-export const MESSAGE_POLL_INTERVAL_MS = 3000;
+export { MESSAGE_POLL_INTERVAL_MS } from '@/services/message-timing';
 type MessagePosition = Pick<MessageResponse, 'created_at' | 'id'>;
 
 function compareMessagePositions(left: MessagePosition, right: MessagePosition) {

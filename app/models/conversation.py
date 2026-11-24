@@ -32,7 +32,7 @@ class Conversation(Base):
             )
             OR
             (
-                type = 'GROUP'
+                type IN ('GROUP', 'CHANNEL')
                 AND user_a_id IS NULL
                 AND user_b_id IS NULL
             )
@@ -40,9 +40,11 @@ class Conversation(Base):
             name="ck_conversations_valid_type_and_users",
         ),
         CheckConstraint(
-            "type IN ('DIRECT', 'GROUP')",
+            "type IN ('DIRECT', 'GROUP', 'CHANNEL')",
             name="ck_conversations_valid_type",
         ),
+        CheckConstraint("(type = 'CHANNEL') = (channel_id IS NOT NULL)", name="ck_conversations_channel_scope"),
+        UniqueConstraint("channel_id", name="uq_conversations_channel"),
         UniqueConstraint(
             "user_a_id",
             "user_b_id",
@@ -57,6 +59,8 @@ class Conversation(Base):
         String(10),
         nullable=False,
     )
+
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("server_channels.id", ondelete="CASCADE"))
 
     user_a_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"),

@@ -13,8 +13,9 @@ from app.models import (
     ServerRole,
     User,
 )
-from app.schemas import ServerRoleCreate, ServerRoleUpdate
-from app.server_permissions import SERVER_PERMISSION_KEYS
+from app.models.server_channel import ServerChannelRole
+from app.schemas import ServerRoleCreate, ServerRoleResponse, ServerRoleUpdate
+from app.server_permissions import SERVER_PERMISSION_KEYS, check_expected_permissions
 from app.services.server_authorization_service import (
     get_member_hierarchy_level,
     has_server_permission,
@@ -71,12 +72,25 @@ def _is_server_role_name_conflict(error: IntegrityError) -> bool:
     )
 
 
+def _role_snapshot(role: ServerRole) -> dict:
+    return {
+        "id": role.id,
+        "name": role.name,
+        "description": role.description,
+        "position": role.position,
+        "permissions": dict(role.permissions),
+        "is_default": role.is_default,
+        "is_system_role": role.is_system_role,
+        "created_at": role.created_at.isoformat(),
+    }
+
+
 def create_server_role(
     db: Session,
     server_id: int,
     actor_user_id: int,
     role_data: ServerRoleCreate,
-) -> ServerRole:
+) -> ServerRoleResponse:
     """Create a common role after authorization, in one server transaction.
 
     The authenticated principal must supply ``actor_user_id``. Future role
@@ -157,8 +171,18 @@ def create_server_role(
         db.add(role)
         db.flush()
         db.refresh(role)
+        db.add(ServerConfigHistory(
+            server_id=server.id,
+            changed_by=actor_user_id,
+            setting_name=f"server_role:{role.id}",
+            old_value=json.dumps(None),
+            new_value=json.dumps(_role_snapshot(role), ensure_ascii=False,
+                                 sort_keys=True, separators=(",", ":")),
+        ))
+        db.flush()
+        response = ServerRoleResponse.model_validate(role)
         db.commit()
-        return role
+        return response
     except HTTPException:
         db.rollback()
         raise
@@ -370,8 +394,7 @@ def assign_server_role_to_member(
             db, server_id, actor_user_id, target_user_id, role_id
         )
 
-        target_is_owner = target_user_id == server.owner_id
-        if not target_is_owner:
+        if not is_owner:
             target_permissions = resolve_server_permissions(
                 db, server_id, target_user_id
             ).permissions
@@ -614,7 +637,8 @@ def update_server_role(
     role_id: int,
     actor_user_id: int,
     role_data: ServerRoleUpdate,
-) -> ServerRole:
+    expected_permissions: str | None = None,
+) -> ServerRoleResponse:
     """Update a common role, applying authorization and audit atomically.
 
     Mutations of roles and assignments must take the server row lock first;
@@ -626,6 +650,7 @@ def update_server_role(
         server = db.scalar(
             select(Server)
             .where(Server.id == server_id)
+            .execution_options(populate_existing=True)
             .with_for_update()
         )
         if server is None:
@@ -640,6 +665,7 @@ def update_server_role(
                 ServerMember.server_id == server_id,
                 ServerMember.user_id == actor_user_id,
             )
+            .execution_options(populate_existing=True)
             .with_for_update()
         )
         if membership is None or membership.status != "ACTIVE":
@@ -654,6 +680,7 @@ def update_server_role(
                 ServerRole.id == role_id,
                 ServerRole.server_id == server_id,
             )
+            .execution_options(populate_existing=True)
             .with_for_update()
         )
         if role is None:
@@ -735,11 +762,13 @@ def update_server_role(
                         detail="O cargo está atribuído a membro de hierarquia igual ou superior.",
                     )
 
-        proposed_permissions = (
-            dict(role_data.permissions)
-            if "permissions" in role_data.model_fields_set
-            else dict(role.permissions)
-        )
+        if "permissions" in role_data.model_fields_set:
+            check_expected_permissions(expected_permissions, role.permissions)
+            proposed_permissions = {
+                key: value for key, value in role.permissions.items()
+                if key not in SERVER_PERMISSION_KEYS
+            }
+            proposed_permissions.update(role_data.permissions)
         if not is_owner and "permissions" in role_data.model_fields_set:
             old_role_grants = _granted_permissions(role.permissions)
             new_role_grants = _granted_permissions(proposed_permissions)
@@ -776,7 +805,7 @@ def update_server_role(
         for field_name in role_data.model_fields_set:
             new_value = getattr(role_data, field_name)
             if field_name == "permissions":
-                new_value = dict(new_value)
+                new_value = proposed_permissions
             old_value = getattr(role, field_name)
             if old_value != new_value:
                 old_values[field_name] = (
@@ -810,8 +839,9 @@ def update_server_role(
             db.flush()
             db.refresh(role)
 
+        response = ServerRoleResponse.model_validate(role)
         db.commit()
-        return role
+        return response
     except HTTPException:
         db.rollback()
         raise
@@ -933,16 +963,12 @@ def delete_server_role(
                 detail="Não é possível excluir um cargo que possui membros atribuídos.",
             )
 
-        old_value = {
-            "id": role.id,
-            "name": role.name,
-            "description": role.description,
-            "position": role.position,
-            "permissions": dict(role.permissions),
-            "is_default": role.is_default,
-            "is_system_role": role.is_system_role,
-            "created_at": role.created_at.isoformat(),
-        }
+        if db.scalar(select(ServerChannelRole.channel_id).where(
+            ServerChannelRole.server_id == server_id, ServerChannelRole.role_id == role.id
+        ).limit(1)) is not None:
+            raise HTTPException(409, "Revogue o acesso do cargo aos canais antes de excluí-lo.")
+
+        old_value = _role_snapshot(role)
         db.add(
             ServerConfigHistory(
                 server_id=server.id,

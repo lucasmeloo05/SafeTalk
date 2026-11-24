@@ -5,8 +5,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models import Server, ServerMember, ServerMemberRole, User
-from app.schemas import ServerMemberResponse
+from app.models import Server, ServerMember, ServerMemberRole, ServerRole, User
+from app.schemas import ServerMemberResponse, ServerMemberRoleSummary
 from app.services.server_authorization_service import (
     require_active_server_membership,
 )
@@ -21,8 +21,9 @@ def list_active_server_members(
 ) -> list[ServerMemberResponse]:
     require_active_server_membership(db, server_id, current_user.id)
 
-    rows = db.execute(
+    rows = list(db.execute(
         select(
+            ServerMember.id.label("member_id"),
             ServerMember.user_id.label("user_id"),
             User.username.label("username"),
             ServerMember.joined_at.label("joined_at"),
@@ -35,9 +36,68 @@ def list_active_server_members(
         .order_by(ServerMember.joined_at.desc(), ServerMember.user_id.asc())
         .limit(limit)
         .offset(offset)
-    ).mappings()
+    ).mappings().all())
 
-    return [ServerMemberResponse.model_validate(dict(row)) for row in rows]
+    roles_by_member = _load_member_role_summaries(
+        db,
+        server_id,
+        [row["member_id"] for row in rows],
+    )
+
+    return [
+        ServerMemberResponse.model_validate({
+            "user_id": row["user_id"],
+            "username": row["username"],
+            "joined_at": row["joined_at"],
+            "roles": roles_by_member.get(row["member_id"], []),
+        })
+        for row in rows
+    ]
+
+
+def _load_member_role_summaries(
+    db: Session,
+    server_id: int,
+    membership_ids: list[int],
+) -> dict[int, list[ServerMemberRoleSummary]]:
+    """Load assignments for a page of members with one bounded query."""
+    if not membership_ids:
+        return {}
+
+    rows = db.execute(
+        select(
+            ServerMemberRole.member_id,
+            ServerRole.id.label("id"),
+            ServerRole.name,
+            ServerRole.position,
+        )
+        .join(
+            ServerRole,
+            (ServerRole.id == ServerMemberRole.role_id)
+            & (ServerRole.server_id == ServerMemberRole.server_id),
+        )
+        .where(
+            ServerMemberRole.server_id == server_id,
+            ServerMemberRole.member_id.in_(membership_ids),
+            ServerRole.server_id == server_id,
+        )
+        .order_by(
+            ServerMemberRole.member_id.asc(),
+            ServerRole.position.desc(),
+            ServerRole.id.asc(),
+        )
+    ).all()
+
+    roles_by_member: dict[int, list[ServerMemberRoleSummary]] = {}
+    for member_id, role_id, name, position in rows:
+        roles_by_member.setdefault(member_id, []).append(
+            ServerMemberRoleSummary(
+                id=role_id,
+                name=name,
+                position=position,
+            )
+        )
+    return roles_by_member
 
 
 def get_active_server_member(
@@ -50,6 +110,7 @@ def get_active_server_member(
 
     row = db.execute(
         select(
+            ServerMember.id.label("member_id"),
             ServerMember.user_id.label("user_id"),
             User.username.label("username"),
             ServerMember.joined_at.label("joined_at"),
@@ -67,7 +128,16 @@ def get_active_server_member(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Membro não encontrado.",
         )
-    return ServerMemberResponse.model_validate(dict(row))
+    return ServerMemberResponse.model_validate({
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "joined_at": row["joined_at"],
+        "roles": _load_member_role_summaries(
+            db,
+            server_id,
+            [row["member_id"]],
+        ).get(row["member_id"], []),
+    })
 
 
 def _remove_member_role_assignments(

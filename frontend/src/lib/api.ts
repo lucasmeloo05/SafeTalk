@@ -55,7 +55,9 @@ api.interceptors.response.use(
           ? `A solicitação falhou (${error.response.status}).`
           : "Não foi possível conectar à API. Verifique sua conexão e tente novamente.";
 
-    if (error.response?.status === 401) {
+    const factorProofRequest = error.config?.method === "post" &&
+      (error.config.url?.startsWith("/users/me/2fa/") || error.config.url === "/users/login/2fa");
+    if (error.response?.status === 401 && !factorProofRequest) {
       const hadSessionToken = Boolean(tokenStorage.get());
       tokenStorage.clear();
       if (hadSessionToken && typeof window !== "undefined") {

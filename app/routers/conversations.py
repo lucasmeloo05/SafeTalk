@@ -54,6 +54,7 @@ def list_conversations(
             ConversationParticipant.conversation_id == Conversation.id,
         )
         .where(
+            Conversation.type != "CHANNEL",
             ConversationParticipant.user_id == current_user.id,
             ConversationParticipant.status == "ACTIVE",
         )

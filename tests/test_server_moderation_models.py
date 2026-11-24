@@ -286,6 +286,7 @@ def test_moderation_audit_persists_events_and_role_snapshot(
         ("MEMBER_KICKED", False, []),
         ("MEMBER_BANNED", True, []),
         ("MEMBER_UNBANNED", True, None),
+        ("OWNERSHIP_TRANSFERRED", False, None),
     ],
 )
 def test_approved_moderation_event_snapshot_shapes_are_accepted(
@@ -323,6 +324,8 @@ def test_approved_moderation_event_snapshot_shapes_are_accepted(
         ("MEMBER_BANNED", 1, {}),
         ("MEMBER_UNBANNED", None, None),
         ("MEMBER_UNBANNED", 1, []),
+        ("OWNERSHIP_TRANSFERRED", 1, None),
+        ("OWNERSHIP_TRANSFERRED", None, []),
     ],
 )
 def test_invalid_audit_event_combinations_are_rejected(

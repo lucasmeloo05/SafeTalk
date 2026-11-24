@@ -1,6 +1,7 @@
+from app.server_age_dependency import require_server_age
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, status
+from fastapi import APIRouter, Header, Depends, Path, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -10,6 +11,7 @@ from app.schemas import (
     ServerCreate,
     ServerEveryonePermissionsResponse,
     ServerEveryonePermissionsUpdate,
+    ServerOwnershipTransfer,
     ServerResponse,
     ServerUpdate,
 )
@@ -19,10 +21,11 @@ from app.services.server_service import (
     list_active_servers,
     update_everyone_permissions,
     update_server,
+    transfer_server_ownership,
 )
 
 
-router = APIRouter(prefix="/servers", tags=["Servidores"])
+router = APIRouter(prefix="/servers", tags=["Servidores"], dependencies=[Depends(require_server_age)])
 
 
 @router.post(
@@ -65,6 +68,25 @@ def update_server_route(
     return update_server(db, current_user, server_id, server_data)
 
 
+@router.post(
+    "/{server_id}/transfer-ownership",
+    response_model=ServerResponse,
+    status_code=status.HTTP_200_OK,
+)
+def transfer_server_ownership_route(
+    server_id: Annotated[int, Path(gt=0)],
+    transfer_data: ServerOwnershipTransfer,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    return transfer_server_ownership(
+        db=db,
+        server_id=server_id,
+        actor_user_id=current_user.id,
+        new_owner_id=transfer_data.new_owner_id,
+    )
+
+
 @router.patch(
     "/{server_id}/everyone-permissions",
     response_model=ServerEveryonePermissionsResponse,
@@ -74,10 +96,12 @@ def update_everyone_permissions_route(
     permissions_data: ServerEveryonePermissionsUpdate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
+    expected_permissions: Annotated[str | None, Header(alias="X-Expected-Permissions")] = None,
 ):
     return update_everyone_permissions(
         db=db,
         current_user=current_user,
         server_id=server_id,
         permissions=permissions_data.root,
+        expected_permissions=expected_permissions,
     )

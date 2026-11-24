@@ -307,6 +307,7 @@ def test_manager_cannot_grant_permission_they_do_not_have(db_session, create_use
             role.id,
             actor["id"],
             _update(permissions={"ban_members": True}),
+            expected_permissions="{}",
         )
 
     assert error.value.status_code == 403
@@ -327,6 +328,7 @@ def test_manager_can_grant_owned_permission_to_lower_active_assignees(
         role.id,
         actor["id"],
         _update(permissions={"kick_members": True}),
+        expected_permissions='{}',
     )
 
     assert updated.permissions == {"kick_members": True}
@@ -365,6 +367,7 @@ def test_new_manage_roles_grant_cannot_authorize_its_own_edit(
             own_target_role.id,
             actor["id"],
             _update(permissions={"manage_roles": True}),
+            expected_permissions="{}",
         )
 
     assert error.value.status_code == 403
@@ -465,6 +468,7 @@ def test_permissions_replace_whole_object_and_preserve_union(
         role.id,
         owner["id"],
         _update(permissions={"kick_members": False}),
+        expected_permissions='{"ban_members":true,"kick_members":true}',
     )
 
     assert updated.permissions == {"kick_members": False}
@@ -490,6 +494,7 @@ def test_empty_permissions_object_removes_role_grants(db_session, create_user):
         role.id,
         owner["id"],
         _update(permissions={}),
+        expected_permissions='{"ban_members":true}',
     )
 
     assert updated.permissions == {}
@@ -571,6 +576,7 @@ def test_noop_update_does_not_create_empty_audit_record(db_session, create_user)
         role.id,
         owner["id"],
         _update(name="Cargo", permissions={"kick_members": False}),
+        expected_permissions='{}',
     )
 
     assert db_session.scalar(

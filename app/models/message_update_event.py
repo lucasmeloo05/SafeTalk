@@ -28,7 +28,7 @@ class MessageUpdateEvent(Base):
             name="uq_message_update_events_conversation_revision_message",
         ),
         CheckConstraint("revision >= 1", name="ck_message_update_events_revision_positive"),
-        CheckConstraint("event_type IN ('UPDATED', 'DELETED')", name="ck_message_update_events_type"),
+        CheckConstraint("event_type IN ('UPDATED', 'DELETED', 'CREATED')", name="ck_message_update_events_type"),
         ForeignKeyConstraint(
             ["message_id", "conversation_id"],
             ["messages.id", "messages.conversation_id"],

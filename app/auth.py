@@ -11,6 +11,10 @@ from app.database import get_db
 from app.models import User
 from app.models.platform_staff import PlatformStaff
 from app.settings import settings
+from app.services.moderation_sanction_service import (
+    account_restriction_exception,
+    get_active_account_restriction,
+)
 
 bearer_scheme = HTTPBearer()
 
@@ -49,6 +53,15 @@ def get_current_user(
 
     if user is None or not user.is_active:
         raise credentials_exception
+
+    from app.models.two_factor import TwoFactor
+    factor = db.get(TwoFactor, user.id)
+    if factor and factor.session_version and payload.get("tfv") != factor.session_version:
+        raise credentials_exception
+
+    restriction = get_active_account_restriction(db, user.id)
+    if restriction is not None:
+        raise account_restriction_exception(restriction)
 
     return user
 

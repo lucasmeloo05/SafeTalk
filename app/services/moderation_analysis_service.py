@@ -17,7 +17,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import ModerationAnalysisJob, ModerationReport, ModerationReportEvidence
+from app.models import ModerationAnalysisJob, ModerationReport, ModerationReportEvidence, Server
 
 
 MODEL_NAME = "omni-moderation-latest"
@@ -143,6 +143,16 @@ def _claim_next_job(session_factory: sessionmaker[Session]) -> _ClaimedJob | Non
                 candidate.updated_at = now
                 report.triage_status = "FAILED"
                 report.updated_at = now
+                db.commit()
+                return None
+
+            if evidence.server_id is not None and not db.scalar(
+                select(Server.ai_moderation_enabled).where(Server.id == evidence.server_id)
+            ):
+                candidate.status = "MANUAL_REVIEW"
+                report.triage_status = "MANUAL_REVIEW"
+                candidate.claim_token = None
+                candidate.claimed_at = None
                 db.commit()
                 return None
 

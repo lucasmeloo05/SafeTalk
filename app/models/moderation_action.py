@@ -26,6 +26,12 @@ class ModerationAction(Base):
             "length(trim(action_type)) > 0",
             name="ck_moderation_actions_action_type_not_empty",
         ),
+        CheckConstraint(
+            "decision_code IS NULL OR decision_code IN "
+            "('NO_VIOLATION', 'REVIEWED_MANUALLY', 'WARNING', "
+            "'TEMPORARY_SUSPENSION', 'PERMANENT_BAN')",
+            name="ck_moderation_actions_valid_decision_code",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -49,6 +55,9 @@ class ModerationAction(Base):
     )
 
     action_type: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    # Null for triage/reversal audit events and legacy generic decisions.
+    decision_code: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 

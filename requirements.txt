@@ -34,3 +34,7 @@ tzdata==2026.6
 uvicorn==0.54.0
 watchfiles==1.3.0
 websockets==17.3
+
+cryptography==50.0.2
+pyotp==2.12.1
+qrcode==8.2

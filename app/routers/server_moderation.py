@@ -1,3 +1,4 @@
+from app.server_age_dependency import require_server_age
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
@@ -20,7 +21,7 @@ from app.services.server_moderation_service import (
 )
 
 
-router = APIRouter(prefix="/servers", tags=["Moderação de servidores"])
+router = APIRouter(prefix="/servers", tags=["Moderação de servidores"], dependencies=[Depends(require_server_age)])
 
 
 @router.post(
@@ -113,7 +114,14 @@ def list_server_audit_logs_route(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
     event_type: Literal[
-        "MEMBER_KICKED", "MEMBER_BANNED", "MEMBER_UNBANNED"
+        "MEMBER_KICKED",
+        "MEMBER_BANNED",
+        "MEMBER_UNBANNED",
+        "OWNERSHIP_TRANSFERRED",
+        "CHANNEL_ROLE_ACCESS_GRANTED",
+        "CHANNEL_ROLE_ACCESS_REVOKED",
+        "CHANNEL_BECAME_PRIVATE",
+        "CHANNEL_BECAME_PUBLIC",
     ] | None = None,
     actor_user_id: Annotated[int | None, Query(gt=0)] = None,
     target_user_id: Annotated[int | None, Query(gt=0)] = None,

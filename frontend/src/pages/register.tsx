@@ -60,6 +60,7 @@ export function RegisterPage() {
         <div className="field-group">
           <label className="field-label" htmlFor="birth_date">Data de nascimento</label>
           <input className="field-input" id="birth_date" name="birth_date" type="date" autoComplete="bday" min="1900-01-01" max={new Date().toISOString().slice(0, 10)} required />
+          <span className="field-hint">Você declara sua própria data de nascimento. A idade mínima é 14 anos. Esta declaração não comprova identidade.</span>
         </div>
         <PasswordField id="password" label="Senha" autoComplete="new-password" minLength={8} maxLength={128} />
         <label className="check-label terms-check"><input type="checkbox" required /><span className="custom-check"><Check size={12} /></span><span>Li e aceito os <a href="#termos">Termos de uso</a> e a <a href="#privacidade">Política de privacidade</a>.</span></label>

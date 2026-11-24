@@ -1,3 +1,4 @@
+from app.server_age_dependency import require_server_age
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
@@ -14,7 +15,7 @@ from app.services.server_member_service import (
 )
 
 
-router = APIRouter(prefix="/servers", tags=["Membros de servidores"])
+router = APIRouter(prefix="/servers", tags=["Membros de servidores"], dependencies=[Depends(require_server_age)])
 
 
 @router.get(

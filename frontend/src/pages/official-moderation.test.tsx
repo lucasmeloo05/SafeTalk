@@ -10,6 +10,7 @@ const { authMock, serviceMock } = vi.hoisted(() => ({
   authMock: vi.fn(),
   serviceMock: {
     listOfficialReports: vi.fn(),
+    listOfficialSanctions: vi.fn(),
     getOfficialReport: vi.fn(),
     getOfficialAnalysis: vi.fn(),
     submitOfficialTriage: vi.fn(),
@@ -119,6 +120,8 @@ describe('painel oficial de moderação', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    serviceMock.listOfficialSanctions.mockResolvedValue({ items: [], total: 0 });
     authMock.mockReturnValue({ user, signOut: vi.fn() });
     serviceMock.listOfficialReports.mockResolvedValue(queue);
     serviceMock.getOfficialReport.mockResolvedValue(detail);
@@ -138,6 +141,12 @@ describe('painel oficial de moderação', () => {
     expect(serviceMock.listOfficialReports).toHaveBeenCalledWith(1, 20);
     expect(serviceMock.getOfficialReport).toHaveBeenCalledWith(76);
     expect(serviceMock.getOfficialAnalysis).toHaveBeenCalledWith(76);
+  });
+
+  it('identifica o servidor e o canal de origem da evidência', async () => {
+    serviceMock.getOfficialReport.mockResolvedValue({ ...detail, evidence: { ...detail.evidence, server_id: 12, channel_id: 3 } });
+    renderPage();
+    expect(await screen.findByText('Servidor #12 · Canal #3')).toBeVisible();
   });
 
   it('mostra uma mensagem restrita quando o backend responde 403 sem exibir detalhes', async () => {
@@ -182,14 +191,14 @@ describe('painel oficial de moderação', () => {
       reason: 'Revisão manual necessária.',
     }));
 
-    await userEventInstance.type(screen.getByLabelText(/^Decisão/), 'Sem ação adicional');
+    await userEventInstance.selectOptions(screen.getByLabelText(/^Decisão/), 'NO_VIOLATION');
     await userEventInstance.type(screen.getByLabelText(/obrigatória · até 1\.000 caracteres/), 'Revisão humana concluída.');
     await userEventInstance.click(screen.getByRole('button', { name: 'Registrar decisão' }));
     await waitFor(() => expect(serviceMock.submitOfficialDecision).toHaveBeenCalledWith(76, {
-      decision: 'Sem ação adicional',
+      decision: 'NO_VIOLATION',
       reason: 'Revisão humana concluída.',
     }));
-    expect(screen.getByText(/Nenhuma punição é aplicada automaticamente/)).toBeInTheDocument();
+    expect(screen.getByText(/segunda gera suspensão por 7 dias/)).toBeInTheDocument();
   });
 
   it('mostra o estado de fila vazia', async () => {
@@ -261,11 +270,11 @@ describe('painel oficial de moderação', () => {
       reason: 'Revisão manual da denúncia B.',
     }));
 
-    await userEventInstance.type(screen.getByLabelText(/^Decisão/), 'Revisada B');
+    await userEventInstance.selectOptions(screen.getByLabelText(/^Decisão/), 'REVIEWED_MANUALLY');
     await userEventInstance.type(screen.getByLabelText(/obrigatória · até 1\.000 caracteres/), 'Decisão referente à denúncia B.');
     await userEventInstance.click(screen.getByRole('button', { name: 'Registrar decisão' }));
     await waitFor(() => expect(serviceMock.submitOfficialDecision).toHaveBeenCalledWith(77, {
-      decision: 'Revisada B',
+      decision: 'REVIEWED_MANUALLY',
       reason: 'Decisão referente à denúncia B.',
     }));
     expect(serviceMock.submitOfficialTriage).not.toHaveBeenCalledWith(76, expect.anything());

@@ -13,6 +13,12 @@ from app.models import (
     ModerationReport,
     ModerationReportEvidence,
     PlatformStaff,
+    Server,
+)
+from app.services.moderation_sanction_service import (
+    HUMAN_DECISIONS,
+    issue_sanctions_for_decision,
+    lock_report_target_user,
 )
 
 
@@ -28,14 +34,18 @@ def list_official_reports(
     *,
     page: int,
     page_size: int,
+    viewer_user_id: int | None = None,
 ) -> dict:
-    total = db.scalar(select(func.count(ModerationReport.id))) or 0
+    from app.age_policy import report_age_filter
+    age_scope = report_age_filter(db, viewer_user_id)
+    total = db.scalar(select(func.count(ModerationReport.id)).where(age_scope)) or 0
     rows = db.execute(
         select(ModerationReport, ModerationAnalysisJob)
         .join(
             ModerationAnalysisJob,
             ModerationAnalysisJob.report_id == ModerationReport.id,
         )
+        .where(age_scope)
         .order_by(ModerationReport.created_at.desc(), ModerationReport.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -141,6 +151,9 @@ def triage_report_for_external_analysis(
             )
 
         if external_analysis_eligible and not sensitive_content_suspected:
+            origin = db.scalar(select(ModerationReportEvidence.server_id).where(ModerationReportEvidence.report_id == report_id))
+            if origin is not None and not db.scalar(select(Server.ai_moderation_enabled).where(Server.id == origin)):
+                raise HTTPException(409, "A análise externa está desativada neste servidor.")
             job.status = "PENDING"
             job.available_at = now
             report.triage_status = "APPROVED"
@@ -189,8 +202,16 @@ def record_human_decision(
     decision: str,
     reason: str,
 ) -> ModerationAction:
+    if decision not in HUMAN_DECISIONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Decisão de moderação inválida.",
+        )
     now = datetime.now(timezone.utc)
     try:
+        # All account-affecting moderation decisions lock the target user first.
+        # This serializes lifetime warning counts across different reports.
+        target_user_id = lock_report_target_user(db, report_id)
         report = db.scalar(
             select(ModerationReport)
             .where(ModerationReport.id == report_id)
@@ -204,7 +225,18 @@ def record_human_decision(
                 detail="A denúncia já possui uma decisão humana registrada.",
             )
 
-        # Keep the shared lock order (report, then job) used by the worker.
+        evidence_target_id = db.scalar(
+            select(ModerationReportEvidence.message_author_id).where(
+                ModerationReportEvidence.report_id == report.id
+            )
+        )
+        if evidence_target_id != target_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A evidência da denúncia foi alterada durante a decisão.",
+            )
+
+        # After user -> report, preserve the worker's report -> job ordering.
         # This invalidates an in-flight claim token so its result cannot replace
         # the final human decision.
         job = db.scalar(
@@ -213,16 +245,24 @@ def record_human_decision(
             .with_for_update()
         )
 
-        # action_type stores the human-selected decision label; reason stores
-        # its justification. No outcome vocabulary or automatic sanction is
-        # imposed by this endpoint.
         action = ModerationAction(
             report_id=report.id,
             actor_user_id=staff.user_id,
             action_type=decision,
+            decision_code=decision,
             reason=reason,
         )
         db.add(action)
+        db.flush()
+        issue_sanctions_for_decision(
+            db,
+            report_id=report.id,
+            target_user_id=target_user_id,
+            staff=staff,
+            source_action_id=action.id,
+            decision=decision,
+            reason=reason,
+        )
         report.status = "REVIEWED"
         report.updated_at = now
         if job is not None and job.status in {

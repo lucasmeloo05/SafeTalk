@@ -9,8 +9,10 @@ from app.models import (
     ServerMember,
     ServerMemberRole,
     ServerRole,
+    User,
 )
 from app.server_permissions import SERVER_PERMISSION_KEYS
+from app.schemas import ServerAuthorizationContextResponse
 
 
 # Only permission keys explicitly named in the approved project documents are
@@ -46,19 +48,23 @@ def require_active_server_membership(
     server_id: int,
     user_id: int,
 ) -> ServerMember:
-    membership = db.scalar(
-        select(ServerMember).where(
+    from app.age_policy import is_adult
+    row = db.execute(
+        select(ServerMember, Server.is_adult, User.birth_date)
+        .join(Server, Server.id == ServerMember.server_id)
+        .join(User, User.id == ServerMember.user_id)
+        .where(
             ServerMember.server_id == server_id,
             ServerMember.user_id == user_id,
             ServerMember.status == "ACTIVE",
         )
-    )
-    if membership is None:
+    ).one_or_none()
+    if row is None or (row[1] and not is_adult(row[2])):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Servidor não encontrado.",
         )
-    return membership
+    return row[0]
 
 
 def get_member_hierarchy_level(
@@ -212,6 +218,31 @@ def get_effective_server_permissions(
 ) -> frozenset[str]:
     """Return the union of documented explicit grants for an active member."""
     return resolve_server_permissions(db, server_id, user_id).permissions
+
+
+def get_server_authorization_context(
+    db: Session,
+    server_id: int,
+    user_id: int,
+) -> ServerAuthorizationContextResponse:
+    """Expose the existing authorization resolution to the authenticated actor.
+
+    Identity must come from the JWT principal. The result keeps ownership
+    separate from role grants and reports the same maximum individual-role
+    position used by hierarchy checks.
+    """
+    resolved = resolve_server_permissions(db, server_id, user_id)
+    highest_position = get_member_hierarchy_level(db, server_id, user_id)
+    return ServerAuthorizationContextResponse(
+        server_id=resolved.server_id,
+        user_id=resolved.user_id,
+        is_owner=resolved.is_owner,
+        highest_role_position=highest_position,
+        effective_permissions=sorted(resolved.permissions),
+        has_manage_roles_permission=has_server_permission(
+            resolved, "manage_roles"
+        ),
+    )
 
 
 def has_server_permission(

@@ -34,6 +34,8 @@ export type ModerationReportPage = {
 export type ModerationReportEvidence = {
   message_id: number;
   message_author_id: number;
+  server_id?: number | null;
+  channel_id?: number | null;
   content_snapshot: string;
   message_created_at: string;
   message_updated_at: string;
@@ -45,6 +47,7 @@ export type ModerationAction = {
   id: number;
   actor_user_id: number;
   action_type: string;
+  decision_code?: string | null;
   reason: string | null;
   created_at: string;
 };
@@ -70,8 +73,31 @@ export type ModerationTriagePayload = {
 };
 
 export type ModerationHumanDecisionPayload = {
-  decision: string;
+  decision: 'NO_VIOLATION' | 'REVIEWED_MANUALLY' | 'WARNING' | 'TEMPORARY_SUSPENSION' | 'PERMANENT_BAN';
   reason: string;
+};
+
+export type ModerationSanction = {
+  id: number;
+  report_id: number;
+  target_user_id: number;
+  actor_user_id: number;
+  sanction_type: 'WARNING' | 'TEMPORARY_SUSPENSION' | 'PERMANENT_BAN';
+  reason: string;
+  issued_at: string;
+  expires_at: string | null;
+  reversed_at: string | null;
+  reversed_by: number | null;
+  reversal_reason: string | null;
+  requires_review: boolean;
+  basis_warning_ids: number[];
+  review_history: Array<{
+    id: number;
+    actor_user_id: number;
+    review_type: 'REVIEW_REQUIRED' | 'UPHELD' | 'REVERSED';
+    reason: string;
+    created_at: string;
+  }>;
 };
 
 export type ModerationDecisionResponse = {
@@ -81,6 +107,7 @@ export type ModerationDecisionResponse = {
   decision: string;
   reason: string;
   created_at: string;
+  sanctions: ModerationSanction[];
 };
 
 export async function listOfficialReports(page = 1, pageSize = 20) {
@@ -116,5 +143,19 @@ export async function submitOfficialDecision(
     `/official/reports/${reportId}/decision`,
     payload,
   );
+  return response.data;
+}
+
+export type SanctionReviewDecision = 'REVERSE' | 'UPHOLD';
+
+export async function listOfficialSanctions(targetId: number, page: number, signal: AbortSignal) {
+  const response = await api.get<{ items: ModerationSanction[]; total: number }>('/official/sanctions', {
+    params: { target_user_id: targetId, page, page_size: 10 }, signal,
+  });
+  return response.data;
+}
+
+export async function reviewOfficialSanction(id: number, decision: SanctionReviewDecision, reason: string) {
+  const response = await api.post<ModerationSanction>(`/official/sanctions/${id}/review`, { decision, reason });
   return response.data;
 }

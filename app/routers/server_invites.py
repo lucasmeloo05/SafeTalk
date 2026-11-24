@@ -1,3 +1,4 @@
+from app.server_age_dependency import require_server_age
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
@@ -21,7 +22,7 @@ from app.services.server_invite_service import (
 )
 
 
-router = APIRouter(prefix="/servers", tags=["Convites de servidores"])
+router = APIRouter(prefix="/servers", tags=["Convites de servidores"], dependencies=[Depends(require_server_age)])
 
 
 @router.post(
@@ -35,22 +36,12 @@ def create_server_invite_route(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ServerInviteCreatedResponse:
-    invite, token = create_server_invite(
+    return create_server_invite(
         db,
         server_id,
         current_user.id,
         expires_at=invite_data.expires_at,
         max_uses=invite_data.max_uses,
-    )
-    return ServerInviteCreatedResponse(
-        id=invite.id,
-        server_id=invite.server_id,
-        created_at=invite.created_at,
-        expires_at=invite.expires_at,
-        max_uses=invite.max_uses,
-        uses_count=invite.uses_count,
-        revoked_at=invite.revoked_at,
-        token=token,
     )
 
 
@@ -65,13 +56,12 @@ def accept_server_invite_route(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ServerInviteMembershipResponse:
-    membership = accept_server_invite(
+    return accept_server_invite(
         db,
         server_id,
         invite_data.token,
         current_user.id,
     )
-    return ServerInviteMembershipResponse.model_validate(membership)
 
 
 @router.get(

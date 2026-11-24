@@ -323,7 +323,7 @@ def test_owner_bans_member_without_roles_using_zero_snapshot(
     assert ban.banned_by == owner["id"]
     assert ban.is_active is True
     assert ban.reason == "Banimento"
-    assert ban.target_highest_role_position == 0
+    assert db_session.get(ServerBan, ban.id).target_highest_role_position == 0
     assert db_session.get(ServerMember, target_membership.id).status == "LEFT"
     assert db_session.get(ServerMember, target_membership.id).left_at is not None
     audits = _audit_rows(db_session, server.id, "MEMBER_BANNED")
@@ -363,7 +363,7 @@ def test_ban_captures_highest_position_and_full_role_assignment_snapshot(
         )
     )
 
-    assert ban.target_highest_role_position == 8
+    assert db_session.get(ServerBan, ban.id).target_highest_role_position == 8
     assert len(audit.role_snapshot) == 2
     assert [entry["role"]["position"] for entry in audit.role_snapshot] == [3, 8]
     assert {entry["assignment"]["id"] for entry in audit.role_snapshot} == {
@@ -445,7 +445,7 @@ def test_common_member_can_ban_with_permission_and_higher_hierarchy(
 
     assert ban.is_active is True
     assert ban.banned_by == manager["id"]
-    assert ban.target_highest_role_position == 2
+    assert db_session.get(ServerBan, ban.id).target_highest_role_position == 2
     assert len(_audit_rows(db_session, server.id, "MEMBER_BANNED")) == 1
 
 

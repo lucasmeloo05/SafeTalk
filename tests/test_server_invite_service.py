@@ -82,7 +82,7 @@ def test_owner_creates_invite_and_only_hash_is_persisted(
     owner, server = _server(db_session, create_user)
     expiry = datetime.now(timezone.utc) + timedelta(days=2)
 
-    invite, token = create_server_invite(
+    invite = create_server_invite(
         db_session,
         server.id,
         owner["id"],
@@ -90,9 +90,10 @@ def test_owner_creates_invite_and_only_hash_is_persisted(
         max_uses=4,
     )
 
+    token = invite.token
     stored = db_session.get(ServerInvite, invite.id)
     assert invite.server_id == server.id
-    assert invite.created_by == owner["id"]
+    assert stored.created_by == owner["id"]
     assert invite.created_at is not None
     assert invite.expires_at == expiry
     assert invite.max_uses == 4
@@ -114,10 +115,10 @@ def test_active_member_with_manage_invites_can_create_invite(
     manager = create_user()
     _grant_manage_invites(db_session, server, owner, manager)
 
-    invite, token = create_server_invite(db_session, server.id, manager["id"])
+    invite = create_server_invite(db_session, server.id, manager["id"])
 
-    assert token
-    assert invite.created_by == manager["id"]
+    assert invite.token
+    assert db_session.get(ServerInvite, invite.id).created_by == manager["id"]
     assert invite.server_id == server.id
 
 
@@ -201,7 +202,7 @@ def test_invalid_max_uses_is_rejected(db_session, create_user, max_uses):
 
 def test_owner_can_revoke_invite_transactionally(db_session, create_user):
     owner, server = _server(db_session, create_user)
-    invite, _token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
 
     revoked = revoke_server_invite(
         db_session, server.id, invite.id, owner["id"]
@@ -215,7 +216,7 @@ def test_member_with_manage_invites_can_revoke_invite(db_session, create_user):
     owner, server = _server(db_session, create_user)
     manager = create_user()
     _grant_manage_invites(db_session, server, owner, manager)
-    invite, _token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
 
     revoked = revoke_server_invite(
         db_session, server.id, invite.id, manager["id"]
@@ -228,7 +229,7 @@ def test_member_without_manage_invites_cannot_revoke(db_session, create_user):
     owner, server = _server(db_session, create_user)
     member = create_user()
     _add_member(db_session, server, member)
-    invite, _token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
     db_session.commit()
 
     _assert_http_error(
@@ -245,7 +246,7 @@ def test_nonexistent_or_foreign_server_invite_is_not_revealed(
 ):
     owner_a, server_a = _server(db_session, create_user)
     owner_b, server_b = _server(db_session, create_user, name="Outro servidor")
-    invite, _token = create_server_invite(
+    invite = create_server_invite(
         db_session, server_b.id, owner_b["id"]
     )
 
@@ -265,7 +266,7 @@ def test_nonexistent_or_foreign_server_invite_is_not_revealed(
 
 def test_repeated_invite_revocation_returns_conflict(db_session, create_user):
     owner, server = _server(db_session, create_user)
-    invite, _token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
     revoke_server_invite(db_session, server.id, invite.id, owner["id"])
 
     _assert_http_error(
@@ -300,7 +301,7 @@ def test_create_invite_rolls_back_when_insert_fails(db_session, create_user):
 
 def test_revoke_invite_rolls_back_when_update_fails(db_session, create_user):
     owner, server = _server(db_session, create_user)
-    invite, _token = create_server_invite(db_session, server.id, owner["id"])
+    invite = create_server_invite(db_session, server.id, owner["id"])
     invite_id = invite.id
     connection = db_session.connection()
 
